@@ -8,9 +8,10 @@ import java.util.BitSet;
 import java.util.List;
 
 public final class Model3DService {
-    private static final int MAX_FACES = 450_000;
     private static final int MAX_POINTS = 260_000;
     private static final int MIN_3D_NEIGHBORS = 2;
+    private static final int MIN_COMPONENT_VOXELS = 64;
+    private static final int BODY_MASK_THRESHOLD_HU = -350;
 
     public Model3D buildSurfaceModel(
             List<DicomSlice> slices,
@@ -20,30 +21,32 @@ public final class Model3DService {
             ModelPreset preset
     ) {
         if (slices.isEmpty()) {
-            return new Model3D(List.of(), List.of(), 1.0, false);
+            return new Model3D(List.of(), 1.0, false);
         }
 
         int start = Math.max(0, Math.min(startIndex, endIndex));
         int end = Math.min(slices.size() - 1, Math.max(startIndex, endIndex));
         int sampleStep = Math.max(1, step);
+        int sliceStep = Math.max(1, sampleStep / 2);
         ModelPreset actualPreset = preset == null ? ModelPreset.BONES : preset;
 
         DicomSlice first = slices.get(start);
         int nx = sampledCount(first.getWidth(), sampleStep);
         int ny = sampledCount(first.getHeight(), sampleStep);
-        int nz = end - start + 1;
+        int nz = ((end - start) / sliceStep) + 1;
         if (nx < 2 || ny < 2 || nz < 2) {
-            return new Model3D(List.of(), List.of(), 1.0, false);
+            return new Model3D(List.of(), 1.0, false);
         }
 
-        BitSet active = buildActiveVolume(slices, start, nx, ny, nz, sampleStep, actualPreset);
+        BitSet active = buildActiveVolume(slices, start, nx, ny, nz, sampleStep, sliceStep, actualPreset);
         active = removeIsolatedVoxels(active, nx, ny, nz, MIN_3D_NEIGHBORS);
-        active = keepLargestComponent(active, nx, ny, nz);
+        active = removeSmallComponents(active, nx, ny, nz, MIN_COMPONENT_VOXELS);
 
-        double zCenter = (sliceZ(slices, start, start) + sliceZ(slices, end, start)) / 2.0;
+        int sampledEnd = start + (nz - 1) * sliceStep;
+        double zCenter = (sliceZ(slices, start, start) + sliceZ(slices, sampledEnd, start)) / 2.0;
         AxisBounds xBounds = buildXBounds(first, nx, sampleStep);
         AxisBounds yBounds = buildYBounds(first, ny, sampleStep);
-        AxisBounds zBounds = buildZBounds(slices, start, nz, zCenter);
+        AxisBounds zBounds = buildZBounds(slices, start, nz, sliceStep, zCenter);
 
         Bounds bounds = new Bounds();
         List<ModelPoint> points = buildSurfacePoints(
@@ -54,6 +57,7 @@ public final class Model3DService {
                 ny,
                 nz,
                 sampleStep,
+                sliceStep,
                 actualPreset,
                 xBounds,
                 yBounds,
@@ -61,25 +65,15 @@ public final class Model3DService {
                 bounds
         );
         if (points.isEmpty()) {
-            return new Model3D(List.of(), List.of(), 1.0, false);
+            return new Model3D(List.of(), 1.0, false);
         }
 
-        List<Face> faces = List.of();
         boolean truncated = points.size() > MAX_POINTS;
         if (points.size() > MAX_POINTS) {
             points = decimatePointsEvenly(points, MAX_POINTS);
         }
 
-        return new Model3D(List.copyOf(faces), List.copyOf(points), Math.max(1.0, bounds.radius()), truncated);
-    }
-
-    private List<Face> decimateEvenly(List<Face> faces, int maxFaces) {
-        List<Face> result = new ArrayList<>(maxFaces);
-        double stride = faces.size() / (double) maxFaces;
-        for (int i = 0; i < maxFaces; i++) {
-            result.add(faces.get(Math.min(faces.size() - 1, (int) Math.floor(i * stride))));
-        }
-        return result;
+        return new Model3D(List.copyOf(points), Math.max(1.0, bounds.radius()), truncated);
     }
 
     private List<ModelPoint> decimatePointsEvenly(List<ModelPoint> points, int maxPoints) {
@@ -98,23 +92,84 @@ public final class Model3DService {
             int ny,
             int nz,
             int step,
+            int sliceStep,
             ModelPreset preset
     ) {
         BitSet active = new BitSet(nx * ny * nz);
         for (int z = 0; z < nz; z++) {
-            DicomSlice slice = slices.get(start + z);
+            DicomSlice slice = slices.get(start + z * sliceStep);
             BufferedImage processed = slice.getProcessedImage();
+            BitSet bodyMask = buildLargestBodyMask(slice, BODY_MASK_THRESHOLD_HU);
             for (int y = 0; y < ny; y++) {
                 int sourceY = sampleCoord(y, step, slice.getHeight());
                 for (int x = 0; x < nx; x++) {
                     int sourceX = sampleCoord(x, step, slice.getWidth());
-                    if (isActive(slice, processed, sourceX, sourceY, preset)) {
+                    if (bodyMask.get(sourceY * slice.getWidth() + sourceX)
+                            && intensityAt(processed, sourceX, sourceY) != 0) {
                         active.set(pointIndex(x, y, z, nx, ny));
                     }
                 }
             }
         }
         return active;
+    }
+
+    private BitSet buildLargestBodyMask(DicomSlice slice, int thresholdHu) {
+        int width = slice.getWidth();
+        int height = slice.getHeight();
+        int size = width * height;
+        BitSet candidates = new BitSet(size);
+        float[] hu = slice.getHuPixels();
+        for (int i = 0; i < Math.min(size, hu.length); i++) {
+            if (hu[i] > thresholdHu) {
+                candidates.set(i);
+            }
+        }
+
+        BitSet visited = new BitSet(size);
+        BitSet largest = new BitSet(size);
+        ArrayDeque<Integer> queue = new ArrayDeque<>();
+        for (int seed = candidates.nextSetBit(0); seed >= 0; seed = candidates.nextSetBit(seed + 1)) {
+            if (visited.get(seed)) {
+                continue;
+            }
+            BitSet component = new BitSet(size);
+            visited.set(seed);
+            queue.add(seed);
+            while (!queue.isEmpty()) {
+                int index = queue.removeFirst();
+                component.set(index);
+                int y = index / width;
+                int x = index - y * width;
+                addBodyNeighbor(candidates, visited, queue, x - 1, y, width, height);
+                addBodyNeighbor(candidates, visited, queue, x + 1, y, width, height);
+                addBodyNeighbor(candidates, visited, queue, x, y - 1, width, height);
+                addBodyNeighbor(candidates, visited, queue, x, y + 1, width, height);
+            }
+            if (component.cardinality() > largest.cardinality()) {
+                largest = component;
+            }
+        }
+        return largest;
+    }
+
+    private void addBodyNeighbor(
+            BitSet candidates,
+            BitSet visited,
+            ArrayDeque<Integer> queue,
+            int x,
+            int y,
+            int width,
+            int height
+    ) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return;
+        }
+        int index = y * width + x;
+        if (candidates.get(index) && !visited.get(index)) {
+            visited.set(index);
+            queue.add(index);
+        }
     }
 
     private BitSet removeIsolatedVoxels(BitSet active, int nx, int ny, int nz, int minNeighbors) {
@@ -152,13 +207,13 @@ public final class Model3DService {
         return kept;
     }
 
-    private BitSet keepLargestComponent(BitSet active, int nx, int ny, int nz) {
+    private BitSet removeSmallComponents(BitSet active, int nx, int ny, int nz, int minSize) {
         if (active.isEmpty()) {
             return active;
         }
 
         BitSet visited = new BitSet(nx * ny * nz);
-        BitSet largest = new BitSet(nx * ny * nz);
+        BitSet kept = new BitSet(nx * ny * nz);
         ArrayDeque<Integer> queue = new ArrayDeque<>();
 
         for (int seed = active.nextSetBit(0); seed >= 0; seed = active.nextSetBit(seed + 1)) {
@@ -202,12 +257,12 @@ public final class Model3DService {
                 }
             }
 
-            if (component.cardinality() > largest.cardinality()) {
-                largest = component;
+            if (component.cardinality() >= minSize) {
+                kept.or(component);
             }
         }
 
-        return largest;
+        return kept;
     }
 
     private AxisBounds buildXBounds(DicomSlice slice, int count, int step) {
@@ -234,10 +289,10 @@ public final class Model3DService {
         return new AxisBounds(min, max);
     }
 
-    private AxisBounds buildZBounds(List<DicomSlice> slices, int start, int count, double zCenter) {
+    private AxisBounds buildZBounds(List<DicomSlice> slices, int start, int count, int sliceStep, double zCenter) {
         double[] centers = new double[count];
         for (int i = 0; i < count; i++) {
-            centers[i] = sliceZ(slices, start + i, start) - zCenter;
+            centers[i] = sliceZ(slices, start + i * sliceStep, start) - zCenter;
         }
 
         double[] min = new double[count];
@@ -245,71 +300,14 @@ public final class Model3DService {
         for (int i = 0; i < count; i++) {
             double previousStep = i > 0
                     ? Math.abs(centers[i] - centers[i - 1])
-                    : Math.max(0.0001, slices.get(start + i).getSliceThickness());
+                    : Math.max(0.0001, slices.get(start + i * sliceStep).getSliceThickness() * sliceStep);
             double nextStep = i < count - 1
                     ? Math.abs(centers[i + 1] - centers[i])
-                    : Math.max(0.0001, slices.get(start + i).getSliceThickness());
+                    : Math.max(0.0001, slices.get(start + i * sliceStep).getSliceThickness() * sliceStep);
             min[i] = centers[i] - previousStep / 2.0;
             max[i] = centers[i] + nextStep / 2.0;
         }
         return new AxisBounds(min, max);
-    }
-
-    private List<Face> buildVoxelSurface(
-            List<DicomSlice> slices,
-            BitSet active,
-            int start,
-            int nx,
-            int ny,
-            int nz,
-            int step,
-            ModelPreset preset,
-            AxisBounds xBounds,
-            AxisBounds yBounds,
-            AxisBounds zBounds,
-            Bounds bounds
-    ) {
-        List<Face> faces = new ArrayList<>();
-        for (int z = 0; z < nz; z++) {
-            DicomSlice slice = slices.get(start + z);
-            for (int y = 0; y < ny; y++) {
-                int sourceY = sampleCoord(y, step, slice.getHeight());
-                for (int x = 0; x < nx; x++) {
-                    if (!isActive(active, x, y, z, nx, ny, nz)) {
-                        continue;
-                    }
-
-                    int sourceX = sampleCoord(x, step, slice.getWidth());
-                    int intensity = modelIntensity(slice, sourceX, sourceY, preset);
-                    double x0 = xBounds.min[x];
-                    double x1 = xBounds.max[x];
-                    double y0 = yBounds.min[y];
-                    double y1 = yBounds.max[y];
-                    double z0 = zBounds.min[z];
-                    double z1 = zBounds.max[z];
-
-                    if (!isActive(active, x - 1, y, z, nx, ny, nz)) {
-                        addFace(faces, bounds, intensity, x0, y0, z0, x0, y0, z1, x0, y1, z1, x0, y1, z0);
-                    }
-                    if (!isActive(active, x + 1, y, z, nx, ny, nz)) {
-                        addFace(faces, bounds, intensity, x1, y0, z1, x1, y0, z0, x1, y1, z0, x1, y1, z1);
-                    }
-                    if (!isActive(active, x, y - 1, z, nx, ny, nz)) {
-                        addFace(faces, bounds, intensity, x0, y0, z1, x0, y0, z0, x1, y0, z0, x1, y0, z1);
-                    }
-                    if (!isActive(active, x, y + 1, z, nx, ny, nz)) {
-                        addFace(faces, bounds, intensity, x0, y1, z0, x0, y1, z1, x1, y1, z1, x1, y1, z0);
-                    }
-                    if (!isActive(active, x, y, z - 1, nx, ny, nz)) {
-                        addFace(faces, bounds, intensity, x1, y0, z0, x0, y0, z0, x0, y1, z0, x1, y1, z0);
-                    }
-                    if (!isActive(active, x, y, z + 1, nx, ny, nz)) {
-                        addFace(faces, bounds, intensity, x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y1, z1);
-                    }
-                }
-            }
-        }
-        return faces;
     }
 
     private List<ModelPoint> buildSurfacePoints(
@@ -320,6 +318,7 @@ public final class Model3DService {
             int ny,
             int nz,
             int step,
+            int sliceStep,
             ModelPreset preset,
             AxisBounds xBounds,
             AxisBounds yBounds,
@@ -328,7 +327,7 @@ public final class Model3DService {
     ) {
         List<ModelPoint> points = new ArrayList<>();
         for (int z = 0; z < nz; z++) {
-            DicomSlice slice = slices.get(start + z);
+            DicomSlice slice = slices.get(start + z * sliceStep);
             for (int y = 0; y < ny; y++) {
                 int sourceY = sampleCoord(y, step, slice.getHeight());
                 for (int x = 0; x < nx; x++) {
@@ -366,60 +365,6 @@ public final class Model3DService {
         return active.get(pointIndex(x, y, z, nx, ny));
     }
 
-    private void addFace(
-            List<Face> faces,
-            Bounds bounds,
-            int intensity,
-            double ax, double ay, double az,
-            double bx, double by, double bz,
-            double cx, double cy, double cz,
-            double dx, double dy, double dz
-    ) {
-        Vertex a = new Vertex(ax, ay, az);
-        Vertex b = new Vertex(bx, by, bz);
-        Vertex c = new Vertex(cx, cy, cz);
-        bounds.add(ax, ay, az);
-        bounds.add(bx, by, bz);
-        bounds.add(cx, cy, cz);
-        bounds.add(dx, dy, dz);
-        faces.add(new Face(
-                new double[] { ax, bx, cx, dx },
-                new double[] { ay, by, cy, dy },
-                new double[] { az, bz, cz, dz },
-                intensity,
-                normalShade(a, b, c)
-        ));
-    }
-
-    private double normalShade(Vertex a, Vertex b, Vertex c) {
-        double ux = b.x - a.x;
-        double uy = b.y - a.y;
-        double uz = b.z - a.z;
-        double vx = c.x - a.x;
-        double vy = c.y - a.y;
-        double vz = c.z - a.z;
-        double nx = uy * vz - uz * vy;
-        double ny = uz * vx - ux * vz;
-        double nz = ux * vy - uy * vx;
-        double length = Math.sqrt(nx * nx + ny * ny + nz * nz);
-        if (length < 0.000001) {
-            return 0.8;
-        }
-        double light = Math.abs((nx * 0.25 + ny * -0.45 + nz * 0.85) / length);
-        return 0.52 + light * 0.72;
-    }
-
-    private boolean isActive(DicomSlice slice, BufferedImage processed, int x, int y, ModelPreset preset) {
-        if (intensityAt(processed, x, y) == 0) {
-            return false;
-        }
-        if (preset == ModelPreset.FILTERED_MASK) {
-            return true;
-        }
-        float hu = slice.getHu(y, x);
-        return hu >= preset.minHu() && hu <= preset.maxHu();
-    }
-
     private int modelIntensity(DicomSlice slice, int x, int y, ModelPreset preset) {
         if (preset == ModelPreset.FILTERED_MASK) {
             return 190;
@@ -431,7 +376,14 @@ public final class Model3DService {
 
     private int[] colorFor(DicomSlice slice, int x, int y, ModelPreset preset) {
         int value = modelIntensity(slice, x, y, preset);
-        if (preset == ModelPreset.BONES || preset == ModelPreset.FILTERED_MASK) {
+        if (preset == ModelPreset.BONES) {
+            return new int[] {
+                    Math.min(255, (int) Math.round(value * 1.08)),
+                    Math.min(245, (int) Math.round(value * 0.98)),
+                    Math.min(225, (int) Math.round(value * 0.84))
+            };
+        }
+        if (preset == ModelPreset.FILTERED_MASK) {
             return new int[] { value, value, value };
         }
         if (preset == ModelPreset.SOFT_TISSUE) {
@@ -485,29 +437,28 @@ public final class Model3DService {
         return (z * ny + y) * nx + x;
     }
 
-    public record Model3D(List<Face> faces, List<ModelPoint> points, double radius, boolean truncated) {
-    }
-
-    public record Face(double[] x, double[] y, double[] z, int intensity, double shade) {
+    public record Model3D(List<ModelPoint> points, double radius, boolean truncated) {
     }
 
     public record ModelPoint(double x, double y, double z, int intensity, int r, int g, int b) {
     }
 
     public enum ModelPreset {
-        BONES("Кости (HU 250..3000)", 250, 3000),
-        SOFT_TISSUE("Мягкие ткани (HU -150..250)", -150, 250),
-        BODY("Тело целиком (HU -500..3000)", -500, 3000),
-        FILTERED_MASK("Текущая маска фильтра", Integer.MIN_VALUE, Integer.MAX_VALUE);
+        BONES("Кости (HU 400..3000)", 400, 3000, 3),
+        SOFT_TISSUE("Органы / мягкие ткани (HU 0..120)", 0, 120, 6),
+        BODY("Тело целиком (HU -500..3000)", -500, 3000, 5),
+        FILTERED_MASK("Ручной диапазон HU", Integer.MIN_VALUE, Integer.MAX_VALUE, 3);
 
         private final String label;
         private final int minHu;
         private final int maxHu;
+        private final int recommendedStep;
 
-        ModelPreset(String label, int minHu, int maxHu) {
+        ModelPreset(String label, int minHu, int maxHu, int recommendedStep) {
             this.label = label;
             this.minHu = minHu;
             this.maxHu = maxHu;
+            this.recommendedStep = recommendedStep;
         }
 
         public int minHu() {
@@ -518,6 +469,10 @@ public final class Model3DService {
             return maxHu;
         }
 
+        public int recommendedStep() {
+            return recommendedStep;
+        }
+
         @Override
         public String toString() {
             return label;
@@ -525,9 +480,6 @@ public final class Model3DService {
     }
 
     private record AxisBounds(double[] min, double[] max) {
-    }
-
-    private record Vertex(double x, double y, double z) {
     }
 
     private static final class Bounds {

@@ -11,39 +11,15 @@ public final class ImageProcessingService {
             int brightnessThreshold,
             int minHu,
             int maxHu,
-            int blurRadius,
-            boolean contourMode
+            int blurRadius
     ) {
         int width = slice.getWidth();
         int height = slice.getHeight();
         int[] pixels = toGrayArray(slice.getOriginalImage());
 
-        int effectiveBlur = contourMode && blurRadius == 0 ? 1 : blurRadius;
-        int[] denoised = effectiveBlur > 0 ? median3x3(pixels, width, height) : pixels;
-        int[] blurred = effectiveBlur > 0 ? boxBlur(denoised, width, height, effectiveBlur) : denoised;
-        int[] input = contourMode ? difference(pixels, blurred) : blurred;
-        int[] filtered = huBandPass(input, slice.getHuPixels(), brightnessThreshold, minHu, maxHu);
-
-        return toGrayImage(filtered, width, height);
-    }
-
-    public BufferedImage applyFilters(
-            BufferedImage source,
-            int threshold,
-            int bandMin,
-            int bandMax,
-            int blurRadius,
-            boolean contourMode
-    ) {
-        int width = source.getWidth();
-        int height = source.getHeight();
-        int[] pixels = toGrayArray(source);
-
-        int effectiveBlur = contourMode && blurRadius == 0 ? 1 : blurRadius;
-        int[] denoised = effectiveBlur > 0 ? median3x3(pixels, width, height) : pixels;
-        int[] blurred = effectiveBlur > 0 ? boxBlur(denoised, width, height, effectiveBlur) : denoised;
-        int[] input = contourMode ? difference(pixels, blurred) : blurred;
-        int[] filtered = thresholdBandPass(input, threshold, bandMin, bandMax);
+        int[] denoised = blurRadius > 0 ? median3x3(pixels, width, height) : pixels;
+        int[] blurred = blurRadius > 0 ? boxBlur(denoised, width, height, blurRadius) : denoised;
+        int[] filtered = huBandPass(blurred, slice.getHuPixels(), brightnessThreshold, minHu, maxHu);
 
         return toGrayImage(filtered, width, height);
     }
@@ -58,14 +34,6 @@ public final class ImageProcessingService {
             }
         }
         return result;
-    }
-
-    private int[] difference(int[] source, int[] blurred) {
-        int[] output = new int[source.length];
-        for (int i = 0; i < source.length; i++) {
-            output[i] = Math.abs(source[i] - blurred[i]);
-        }
-        return output;
     }
 
     private int[] toGrayArray(BufferedImage source) {
@@ -152,17 +120,6 @@ public final class ImageProcessingService {
             }
         }
 
-        return output;
-    }
-
-    private int[] thresholdBandPass(int[] input, int threshold, int bandMin, int bandMax) {
-        int min = Math.min(bandMin, bandMax);
-        int max = Math.max(bandMin, bandMax);
-        int[] output = new int[input.length];
-        for (int i = 0; i < input.length; i++) {
-            int value = input[i];
-            output[i] = value >= threshold && value >= min && value <= max ? value : 0;
-        }
         return output;
     }
 

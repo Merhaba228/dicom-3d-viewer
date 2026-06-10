@@ -4,6 +4,7 @@ import com.shibaykin.dicom3d.model.DicomSlice;
 import java.awt.image.BufferedImage;
 import java.awt.image.WritableRaster;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -101,9 +102,7 @@ public final class DicomImportService {
                 z,
                 spacingX,
                 spacingY,
-                sliceThickness,
-                rescaleSlope,
-                rescaleIntercept
+                sliceThickness
         );
     }
 
@@ -261,6 +260,18 @@ public final class DicomImportService {
 
     private boolean isDicom(Path path) {
         String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
-        return name.endsWith(".dcm");
+        if (name.endsWith(".dcm")) {
+            return true;
+        }
+        try (InputStream input = Files.newInputStream(path)) {
+            byte[] header = input.readNBytes(132);
+            return header.length == 132
+                    && header[128] == 'D'
+                    && header[129] == 'I'
+                    && header[130] == 'C'
+                    && header[131] == 'M';
+        } catch (IOException ignored) {
+            return false;
+        }
     }
 }

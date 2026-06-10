@@ -1,6 +1,5 @@
 package com.shibaykin.dicom3d.ui;
 
-import com.shibaykin.dicom3d.service.Model3DService.Face;
 import com.shibaykin.dicom3d.service.Model3DService.Model3D;
 import com.shibaykin.dicom3d.service.Model3DService.ModelPoint;
 import java.awt.BorderLayout;
@@ -22,8 +21,11 @@ import javax.swing.JPanel;
 import javax.swing.border.EmptyBorder;
 
 public final class ModelViewerFrame extends JFrame {
+    private static final Color VIEW_BACKGROUND = new Color(17, 24, 27);
+    private static final Color STATUS_BACKGROUND = new Color(24, 33, 36);
+
     public ModelViewerFrame(Model3D model) {
-        super("Просмотр 3D-модели");
+        super("Трехмерная визуализация: облако точек");
         setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
         setSize(980, 760);
         setLocationRelativeTo(null);
@@ -38,7 +40,7 @@ public final class ModelViewerFrame extends JFrame {
         ));
         status.setBorder(new EmptyBorder(8, 12, 8, 12));
         status.setForeground(new Color(230, 236, 245));
-        status.setBackground(new Color(20, 27, 39));
+        status.setBackground(STATUS_BACKGROUND);
         status.setOpaque(true);
 
         add(canvas, BorderLayout.CENTER);
@@ -54,7 +56,7 @@ public final class ModelViewerFrame extends JFrame {
 
         private ModelCanvas(Model3D model) {
             this.model = model;
-            setBackground(new Color(15, 22, 33));
+            setBackground(VIEW_BACKGROUND);
 
             MouseAdapter mouse = new MouseAdapter() {
                 @Override
@@ -92,31 +94,15 @@ public final class ModelViewerFrame extends JFrame {
             Graphics2D g2 = (Graphics2D) graphics.create();
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-            if (model.points().isEmpty() && model.faces().isEmpty()) {
+            if (model.points().isEmpty()) {
                 g2.setColor(new Color(230, 236, 245));
-                g2.drawString("Нет данных для 3D. Настройте фильтры так, чтобы маска содержала ненулевые пиксели.", 24, 32);
+                g2.drawString("Нет данных для облака точек. Настройте фильтры так, чтобы маска содержала ненулевые пиксели.", 24, 32);
                 g2.dispose();
                 return;
             }
 
             double scale = Math.min(getWidth(), getHeight()) * 0.42 * zoom / model.radius();
-            if (!model.points().isEmpty()) {
-                drawPoints(g2, scale);
-                g2.dispose();
-                return;
-            }
-
-            List<DrawableFace> faces = new ArrayList<>(model.faces().size());
-            for (Face face : model.faces()) {
-                faces.add(project(face, scale));
-            }
-            faces.sort(Comparator.comparingDouble(DrawableFace::depth));
-
-            for (DrawableFace face : faces) {
-                g2.setColor(face.color());
-                g2.fillPolygon(face.x(), face.y(), 4);
-            }
-
+            drawPoints(g2, scale);
             g2.dispose();
         }
 
@@ -132,7 +118,8 @@ public final class ModelViewerFrame extends JFrame {
                     continue;
                 }
                 g2.setColor(point.color());
-                g2.fillRect(point.x(), point.y(), 2, 2);
+                int size = point.size();
+                g2.fillOval(point.x() - size / 2, point.y() - size / 2, size, size);
             }
         }
 
@@ -149,43 +136,15 @@ public final class ModelViewerFrame extends JFrame {
 
             int px = (int) Math.round(getWidth() / 2.0 + rx * scale);
             int py = (int) Math.round(getHeight() / 2.0 - ry * scale);
-            double shade = Math.max(0.55, Math.min(1.18, 0.86 + rz2 / (model.radius() * 5.5)));
+            double depth = rz2 / Math.max(1.0, model.radius());
+            double shade = Math.max(0.48, Math.min(1.22, 0.82 + depth * 0.16));
+            int size = depth > 0.35 ? 3 : 2;
             Color color = new Color(
                     clampColor(point.r() * shade),
                     clampColor(point.g() * shade),
                     clampColor(point.b() * shade)
             );
-            return new DrawablePoint(px, py, rz2, color);
-        }
-
-        private DrawableFace project(Face face, double scale) {
-            int[] px = new int[4];
-            int[] py = new int[4];
-            double depth = 0.0;
-
-            double sinX = Math.sin(angleX);
-            double cosX = Math.cos(angleX);
-            double sinY = Math.sin(angleY);
-            double cosY = Math.cos(angleY);
-
-            for (int i = 0; i < 4; i++) {
-                double x = face.x()[i];
-                double y = face.y()[i];
-                double z = face.z()[i];
-
-                double rx = x * cosY + z * sinY;
-                double rz = -x * sinY + z * cosY;
-                double ry = y * cosX - rz * sinX;
-                double rz2 = y * sinX + rz * cosX;
-
-                px[i] = (int) Math.round(getWidth() / 2.0 + rx * scale);
-                py[i] = (int) Math.round(getHeight() / 2.0 - ry * scale);
-                depth += rz2;
-            }
-
-            int value = Math.max(40, Math.min(245, (int) Math.round(face.intensity() * face.shade())));
-            Color color = new Color(value, value, value);
-            return new DrawableFace(px, py, depth / 4.0, color);
+            return new DrawablePoint(px, py, rz2, color, size);
         }
 
         private int clampColor(double value) {
@@ -193,9 +152,6 @@ public final class ModelViewerFrame extends JFrame {
         }
     }
 
-    private record DrawableFace(int[] x, int[] y, double depth, Color color) {
-    }
-
-    private record DrawablePoint(int x, int y, double depth, Color color) {
+    private record DrawablePoint(int x, int y, double depth, Color color, int size) {
     }
 }

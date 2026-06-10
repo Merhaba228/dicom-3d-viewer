@@ -59,17 +59,17 @@ public final class MainFrame extends JFrame {
     private static final int WINDOW_WIDTH = 1500;
     private static final int WINDOW_HEIGHT = 920;
 
-    private static final Color BG_APP = new Color(242, 246, 252);
-    private static final Color BG_PANEL = new Color(249, 251, 255);
-    private static final Color BG_CANVAS = new Color(252, 253, 255);
-    private static final Color ACCENT = new Color(33, 117, 226);
-    private static final Color ACCENT_SOFT = new Color(231, 240, 255);
+    private static final Color BG_APP = new Color(234, 239, 238);
+    private static final Color BG_PANEL = new Color(247, 249, 248);
+    private static final Color BG_CANVAS = new Color(250, 251, 250);
+    private static final Color ACCENT = new Color(42, 116, 105);
+    private static final Color ACCENT_SOFT = new Color(222, 238, 233);
 
-    private static final Color TEXT_PRIMARY = new Color(24, 33, 52);
-    private static final Color TEXT_SECONDARY = new Color(63, 77, 108);
-    private static final Color PANEL_BORDER = new Color(190, 206, 236);
-    private static final Color BUTTON_BG = new Color(164, 208, 255);
-    private static final Color BUTTON_BORDER = new Color(94, 157, 232);
+    private static final Color TEXT_PRIMARY = new Color(31, 43, 42);
+    private static final Color TEXT_SECONDARY = new Color(78, 96, 93);
+    private static final Color PANEL_BORDER = new Color(184, 201, 197);
+    private static final Color BUTTON_BG = new Color(211, 231, 225);
+    private static final Color BUTTON_BORDER = new Color(113, 161, 151);
 
     private final DicomImportService importService = new DicomImportService();
     private final ImageProcessingService processingService = new ImageProcessingService();
@@ -83,11 +83,9 @@ public final class MainFrame extends JFrame {
     private final ImageCanvas filteredCanvas = new ImageCanvas("После обработки");
 
     private final JSlider thresholdSlider = slider(0, 255, 0);
-    private final JSlider bandMinSlider = slider(-1000, 3000, -1000);
+    private final JSlider bandMinSlider = slider(-1000, 3000, 400);
     private final JSlider bandMaxSlider = slider(-1000, 3000, 3000);
     private final JSlider blurSlider = slider(0, 8, 0);
-    private final JToggleButton contourModeToggle = new JToggleButton("Контур по размытию");
-
     private final JLabel thresholdValueLabel = new JLabel();
     private final JLabel bandMinValueLabel = new JLabel();
     private final JLabel bandMaxValueLabel = new JLabel();
@@ -98,10 +96,10 @@ public final class MainFrame extends JFrame {
     private final JLabel rangeStartValueLabel = new JLabel("Начальный срез: -");
     private final JLabel rangeEndValueLabel = new JLabel("Конечный срез: -");
 
-    private final JSlider modelStepSlider = slider(1, 8, 2);
+    private final JSlider modelStepSlider = slider(1, 8, 3);
     private final JLabel modelStepValueLabel = new JLabel();
     private final JComboBox<ModelPreset> modelPresetCombo = new JComboBox<>(ModelPreset.values());
-    private final JButton openModelButton = button("Построить 3D", this::openModel3DAsync);
+    private final JButton openModelButton = button("Построить облако точек", this::openModel3DAsync);
 
     private final JToggleButton maskModeToggle = new JToggleButton("Режим кисти");
     private final JToggleButton pointCropModeToggle = new JToggleButton("Обрезка по точкам");
@@ -123,9 +121,10 @@ public final class MainFrame extends JFrame {
     private boolean ignoreSliceSliderChange;
     private boolean ignoreListSelectionChange;
     private boolean ignoreRangeSliderChange;
+    private boolean ignoreModelPresetChange;
 
     public MainFrame() {
-        super("DICOM-просмотрщик - фильтры, маска и 3D");
+        super("DICOM-просмотрщик - фильтры, маска и трехмерная визуализация");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(WINDOW_WIDTH, WINDOW_HEIGHT);
         setLocationRelativeTo(null);
@@ -204,18 +203,24 @@ public final class MainFrame extends JFrame {
 
         JLabel title = new JLabel("Настройки обработки");
         title.setForeground(TEXT_PRIMARY);
-        title.setFont(title.getFont().deriveFont(Font.BOLD, 18f));
+        title.setFont(title.getFont().deriveFont(Font.BOLD, 17f));
         panel.add(title);
         panel.add(Box.createVerticalStrut(10));
 
         JPanel filtersBlock = sectionPanel("Фильтры");
-        styleToggle(contourModeToggle);
+        modelPresetCombo.setSelectedItem(ModelPreset.BONES);
+        modelPresetCombo.setAlignmentX(LEFT_ALIGNMENT);
+        modelPresetCombo.setMaximumSize(new Dimension(Integer.MAX_VALUE, modelPresetCombo.getPreferredSize().height));
         addSliderRow(filtersBlock, "Порог яркости (0..255)", thresholdSlider, thresholdValueLabel);
         addSliderRow(filtersBlock, "Мин. HU", bandMinSlider, bandMinValueLabel);
         addSliderRow(filtersBlock, "Макс. HU", bandMaxSlider, bandMaxValueLabel);
-        addSliderRow(filtersBlock, "Размытие (0..8)", blurSlider, blurValueLabel);
-        filtersBlock.add(contourModeToggle);
+        JLabel modelPresetLabel = new JLabel("Готовый диапазон HU");
+        modelPresetLabel.setForeground(TEXT_PRIMARY);
+        modelPresetLabel.setAlignmentX(LEFT_ALIGNMENT);
+        filtersBlock.add(modelPresetLabel);
+        filtersBlock.add(modelPresetCombo);
         filtersBlock.add(Box.createVerticalStrut(8));
+        addSliderRow(filtersBlock, "Размытие (0..8)", blurSlider, blurValueLabel);
         filtersBlock.add(resetAllFiltersButton);
         panel.add(filtersBlock);
         panel.add(Box.createVerticalStrut(10));
@@ -227,16 +232,8 @@ public final class MainFrame extends JFrame {
         panel.add(rangeBlock);
         panel.add(Box.createVerticalStrut(10));
 
-        JPanel modelBlock = sectionPanel("3D-модель");
-        modelPresetCombo.setSelectedItem(ModelPreset.BONES);
-        modelPresetCombo.setAlignmentX(LEFT_ALIGNMENT);
-        JLabel modelPresetLabel = new JLabel("Тип ткани");
-        modelPresetLabel.setForeground(TEXT_PRIMARY);
-        modelPresetLabel.setAlignmentX(LEFT_ALIGNMENT);
-        modelBlock.add(modelPresetLabel);
-        modelBlock.add(modelPresetCombo);
-        modelBlock.add(Box.createVerticalStrut(8));
-        addSliderRow(modelBlock, "Шаг выборки 3D", modelStepSlider, modelStepValueLabel);
+        JPanel modelBlock = sectionPanel("Трехмерная визуализация");
+        addSliderRow(modelBlock, "Шаг выборки точек", modelStepSlider, modelStepValueLabel);
         modelBlock.add(openModelButton);
         panel.add(modelBlock);
         panel.add(Box.createVerticalStrut(10));
@@ -258,7 +255,7 @@ public final class MainFrame extends JFrame {
         maskBlock.add(resetMaskButton);
         panel.add(maskBlock);
 
-        panel.add(Box.createVerticalGlue());
+        panel.add(Box.createVerticalStrut(80));
         Dimension preferred = panel.getPreferredSize();
         panel.setPreferredSize(new Dimension(360, preferred.height));
         return panel;
@@ -345,9 +342,9 @@ public final class MainFrame extends JFrame {
             slider.setForeground(ACCENT);
         }
 
-        thumbnailList.setBackground(new Color(240, 246, 255));
+        thumbnailList.setBackground(new Color(239, 244, 242));
         thumbnailList.setForeground(TEXT_PRIMARY);
-        thumbnailList.setSelectionBackground(new Color(191, 221, 255));
+        thumbnailList.setSelectionBackground(new Color(202, 226, 219));
         thumbnailList.setSelectionForeground(TEXT_PRIMARY);
         modelPresetCombo.setBackground(Color.WHITE);
         modelPresetCombo.setForeground(TEXT_PRIMARY);
@@ -382,7 +379,7 @@ public final class MainFrame extends JFrame {
         rangeEndSlider.addChangeListener(this::onRangeSliderChanged);
         brushSizeSlider.addChangeListener(event -> refreshMaskLabels());
         modelStepSlider.addChangeListener(event -> refreshModelLabels());
-        contourModeToggle.addActionListener(event -> updateSelectedPreview());
+        modelPresetCombo.addActionListener(event -> applySelectedModelPreset());
 
         pointCropModeToggle.addActionListener(event -> {
             if (!pointCropModeToggle.isSelected()) {
@@ -425,8 +422,46 @@ public final class MainFrame extends JFrame {
 
     private void onFilterSliderChanged(ChangeEvent event) {
         enforceBandOrder(event);
+        if (!ignoreModelPresetChange
+                && (event.getSource() == bandMinSlider || event.getSource() == bandMaxSlider)) {
+            ignoreModelPresetChange = true;
+            modelPresetCombo.setSelectedItem(ModelPreset.FILTERED_MASK);
+            ignoreModelPresetChange = false;
+        }
         refreshFilterLabels();
         updateSelectedPreview();
+    }
+
+    private void applySelectedModelPreset() {
+        if (ignoreModelPresetChange) {
+            return;
+        }
+        ModelPreset preset = (ModelPreset) modelPresetCombo.getSelectedItem();
+        if (preset == null || preset == ModelPreset.FILTERED_MASK) {
+            return;
+        }
+
+        ignoreModelPresetChange = true;
+        bandMinSlider.setValue(recommendedMinHu(preset));
+        bandMaxSlider.setValue(preset.maxHu());
+        modelStepSlider.setValue(preset.recommendedStep());
+        ignoreModelPresetChange = false;
+        refreshFilterLabels();
+        refreshModelLabels();
+        updateSelectedPreview();
+    }
+
+    private int recommendedMinHu(ModelPreset preset) {
+        if (preset != ModelPreset.BONES || slices.isEmpty()) {
+            return preset.minHu();
+        }
+        float maxHu = Float.NEGATIVE_INFINITY;
+        for (DicomSlice slice : slices) {
+            for (float hu : slice.getHuPixels()) {
+                maxHu = Math.max(maxHu, hu);
+            }
+        }
+        return maxHu < 1000 ? 200 : preset.minHu();
     }
 
     private void onRangeSliderChanged(ChangeEvent event) {
@@ -531,6 +566,7 @@ public final class MainFrame extends JFrame {
                         filteredCanvas.setImage(null);
                     } else {
                         setSelectedIndex(0);
+                        applySelectedModelPreset();
                     }
 
                     statusLabel.setText(String.format(
@@ -622,9 +658,9 @@ public final class MainFrame extends JFrame {
                     statusLabel.setText(String.format(
                             Locale.US,
                             "Готово: порог=%d, HU=[%d..%d], размытие=%d, диапазон=[%d..%d].",
-                            config.thresholdRaw(),
-                            config.bandMinRaw(),
-                            config.bandMaxRaw(),
+                            config.threshold(),
+                            config.bandMin(),
+                            config.bandMax(),
                             config.blur(),
                             range.start() + 1,
                             range.end() + 1
@@ -644,7 +680,7 @@ public final class MainFrame extends JFrame {
 
     private void openModel3DAsync() {
         if (slices.isEmpty()) {
-            statusLabel.setText("Перед построением 3D загрузите DICOM-срезы.");
+            statusLabel.setText("Перед построением облака точек загрузите DICOM-срезы.");
             return;
         }
         if (filterInProgress) {
@@ -661,7 +697,7 @@ public final class MainFrame extends JFrame {
         setFilterControlsEnabled(false);
         statusLabel.setText(String.format(
                 Locale.US,
-                "Построение 3D-модели по срезам [%d..%d]...",
+                "Построение облака точек по срезам [%d..%d]...",
                 range.start() + 1,
                 range.end() + 1
         ));
@@ -687,7 +723,7 @@ public final class MainFrame extends JFrame {
 
                     statusLabel.setText(String.format(
                             Locale.US,
-                            "3D-модель построена: %,d точек, срезы [%d..%d], шаг=%d%s.",
+                            "Трехмерная визуализация построена: %,d точек, срезы [%d..%d], шаг=%d%s.",
                             model.points().size(),
                             range.start() + 1,
                             range.end() + 1,
@@ -696,9 +732,9 @@ public final class MainFrame extends JFrame {
                     ));
                 } catch (InterruptedException interruptedException) {
                     Thread.currentThread().interrupt();
-                    showError("Построение 3D-модели прервано.");
+                    showError("Построение облака точек прервано.");
                 } catch (ExecutionException executionException) {
-                    showError("Ошибка 3D-модели: " + executionException.getCause().getMessage());
+                    showError("Ошибка построения облака точек: " + executionException.getCause().getMessage());
                 } finally {
                     filterInProgress = false;
                     setFilterControlsEnabled(true);
@@ -708,31 +744,38 @@ public final class MainFrame extends JFrame {
     }
 
     private BufferedImage runFilters(DicomSlice slice, FilterConfig config) {
-        return processingService.applyFilters(
+        BufferedImage result = processingService.applyFilters(
                 slice,
                 config.threshold(),
                 config.bandMin(),
                 config.bandMax(),
-                config.blur(),
-                config.contourMode()
+                config.blur()
         );
+        applyManualMask(result, slice.getManualMask());
+        return result;
+    }
+
+    private void applyManualMask(BufferedImage image, BufferedImage manualMask) {
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                if (manualMask.getRaster().getSample(x, y, 0) == 0) {
+                    image.getRaster().setSample(x, y, 0, 0);
+                }
+            }
+        }
     }
 
     private FilterConfig currentFilterConfig() {
-        int thresholdRaw = thresholdSlider.getValue();
-        int bandMinRaw = bandMinSlider.getValue();
-        int bandMaxRaw = bandMaxSlider.getValue();
+        int threshold = thresholdSlider.getValue();
+        int bandMin = bandMinSlider.getValue();
+        int bandMax = bandMaxSlider.getValue();
         int blur = blurSlider.getValue();
 
         return new FilterConfig(
-                thresholdRaw,
-                bandMinRaw,
-                bandMaxRaw,
-                blur,
-                thresholdRaw,
-                bandMinRaw,
-                bandMaxRaw,
-                contourModeToggle.isSelected()
+                threshold,
+                bandMin,
+                bandMax,
+                blur
         );
     }
 
@@ -752,6 +795,10 @@ public final class MainFrame extends JFrame {
     }
 
     private void recomputeCurrentSlice() {
+        DicomSlice slice = selectedSlice();
+        if (slice != null) {
+            slice.resetManualMask();
+        }
         updateSelectedPreview();
         clearCropPoints();
         statusLabel.setText("Текущая маска сброшена.");
@@ -801,17 +848,17 @@ public final class MainFrame extends JFrame {
             polygon.addPoint(point.x, point.y);
         }
 
-        BufferedImage image = slice.getProcessedImage();
-        for (int y = 0; y < image.getHeight(); y++) {
-            for (int x = 0; x < image.getWidth(); x++) {
+        BufferedImage manualMask = slice.getManualMask();
+        for (int y = 0; y < manualMask.getHeight(); y++) {
+            for (int x = 0; x < manualMask.getWidth(); x++) {
                 boolean inside = polygon.contains(x, y);
                 if ((keepInside && !inside) || (!keepInside && inside)) {
-                    image.getRaster().setSample(x, y, 0, 0);
+                    manualMask.getRaster().setSample(x, y, 0, 0);
                 }
             }
         }
 
-        filteredCanvas.setImage(image);
+        updateSelectedPreview();
         thumbnailList.repaint();
         statusLabel.setText(keepInside
                 ? "Применено: оставлена область внутри контура."
@@ -823,9 +870,10 @@ public final class MainFrame extends JFrame {
         thresholdSlider.setValue(0);
         bandMinSlider.setValue(-1000);
         bandMaxSlider.setValue(3000);
+        ignoreModelPresetChange = true;
+        modelPresetCombo.setSelectedItem(ModelPreset.FILTERED_MASK);
+        ignoreModelPresetChange = false;
         blurSlider.setValue(0);
-        contourModeToggle.setSelected(false);
-        updateToggleVisual(contourModeToggle);
         refreshFilterLabels();
 
         if (slices.isEmpty()) {
@@ -834,6 +882,7 @@ public final class MainFrame extends JFrame {
         }
 
         for (DicomSlice slice : slices) {
+            slice.resetManualMask();
             slice.setProcessedImage(slice.getOriginalImage());
         }
 
@@ -871,12 +920,12 @@ public final class MainFrame extends JFrame {
         }
 
         int radius = Math.max(1, brushSizeSlider.getValue());
-        Graphics2D graphics = slice.getProcessedImage().createGraphics();
+        Graphics2D graphics = slice.getManualMask().createGraphics();
         graphics.setColor(Color.BLACK);
         graphics.fillOval(pixelPoint.x - radius, pixelPoint.y - radius, radius * 2, radius * 2);
         graphics.dispose();
 
-        filteredCanvas.setImage(slice.getProcessedImage());
+        updateSelectedPreview();
         thumbnailList.repaint();
     }
 
@@ -897,7 +946,6 @@ public final class MainFrame extends JFrame {
         applyRangeButton.setEnabled(enabled);
         openModelButton.setEnabled(enabled);
         modelPresetCombo.setEnabled(enabled);
-        contourModeToggle.setEnabled(enabled);
         maskModeToggle.setEnabled(enabled);
         pointCropModeToggle.setEnabled(enabled);
         resetAllFiltersButton.setEnabled(enabled);
@@ -1109,14 +1157,10 @@ public final class MainFrame extends JFrame {
     }
 
     private record FilterConfig(
-            int thresholdRaw,
-            int bandMinRaw,
-            int bandMaxRaw,
-            int blur,
             int threshold,
             int bandMin,
             int bandMax,
-            boolean contourMode
+            int blur
     ) {
     }
 

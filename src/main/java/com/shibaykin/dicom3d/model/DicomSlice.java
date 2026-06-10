@@ -1,5 +1,7 @@
 package com.shibaykin.dicom3d.model;
 
+import java.awt.Color;
+import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.nio.file.Path;
 
@@ -7,6 +9,7 @@ public final class DicomSlice {
     private final Path sourcePath;
     private final BufferedImage originalImage;
     private BufferedImage processedImage;
+    private final BufferedImage manualMask;
     private final float[] huPixels;
     private final int width;
     private final int height;
@@ -15,8 +18,6 @@ public final class DicomSlice {
     private final double pixelSpacingX;
     private final double pixelSpacingY;
     private final double sliceThickness;
-    private final double rescaleSlope;
-    private final double rescaleIntercept;
 
     public DicomSlice(
             Path sourcePath,
@@ -28,13 +29,13 @@ public final class DicomSlice {
             double sliceZ,
             double pixelSpacingX,
             double pixelSpacingY,
-            double sliceThickness,
-            double rescaleSlope,
-            double rescaleIntercept
+            double sliceThickness
     ) {
         this.sourcePath = sourcePath;
         this.originalImage = originalImage;
         this.processedImage = originalImage;
+        this.manualMask = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY);
+        resetManualMask();
         this.huPixels = huPixels;
         this.width = width;
         this.height = height;
@@ -43,8 +44,6 @@ public final class DicomSlice {
         this.pixelSpacingX = pixelSpacingX;
         this.pixelSpacingY = pixelSpacingY;
         this.sliceThickness = sliceThickness;
-        this.rescaleSlope = rescaleSlope;
-        this.rescaleIntercept = rescaleIntercept;
     }
 
     public Path getSourcePath() {
@@ -61,6 +60,17 @@ public final class DicomSlice {
 
     public void setProcessedImage(BufferedImage processedImage) {
         this.processedImage = processedImage;
+    }
+
+    public BufferedImage getManualMask() {
+        return manualMask;
+    }
+
+    public void resetManualMask() {
+        Graphics2D graphics = manualMask.createGraphics();
+        graphics.setColor(Color.WHITE);
+        graphics.fillRect(0, 0, manualMask.getWidth(), manualMask.getHeight());
+        graphics.dispose();
     }
 
     public float[] getHuPixels() {
@@ -101,14 +111,6 @@ public final class DicomSlice {
 
     public double getSliceThickness() {
         return sliceThickness;
-    }
-
-    public double getRescaleSlope() {
-        return rescaleSlope;
-    }
-
-    public double getRescaleIntercept() {
-        return rescaleIntercept;
     }
 
     public String shortName() {
