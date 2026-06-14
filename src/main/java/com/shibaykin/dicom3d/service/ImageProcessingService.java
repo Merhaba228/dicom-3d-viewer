@@ -6,18 +6,22 @@ import java.awt.image.WritableRaster;
 import java.util.Arrays;
 
 public final class ImageProcessingService {
+    private static final int GRAY_SIMILARITY_TOLERANCE = 24;
+    private static final int MIN_SIMILAR_GRAY_NEIGHBORS = 2;
+
     public BufferedImage applyFilters(
             DicomSlice slice,
             int brightnessThreshold,
             int minHu,
             int maxHu,
+            boolean medianEnabled,
             int blurRadius
     ) {
         int width = slice.getWidth();
         int height = slice.getHeight();
         int[] pixels = toGrayArray(slice.getOriginalImage());
 
-        int[] denoised = blurRadius > 0 ? median3x3(pixels, width, height) : pixels;
+        int[] denoised = medianEnabled ? median3x3(pixels, width, height) : pixels;
         int[] blurred = blurRadius > 0 ? boxBlur(denoised, width, height, blurRadius) : denoised;
         int[] filtered = huBandPass(blurred, slice.getHuPixels(), brightnessThreshold, minHu, maxHu);
 
@@ -65,22 +69,30 @@ public final class ImageProcessingService {
     }
 
     private int[] median3x3(int[] input, int width, int height) {
-        int[] output = new int[input.length];
+        int[] output = Arrays.copyOf(input, input.length);
         int[] window = new int[9];
 
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
                 int count = 0;
+                int similarNeighbors = 0;
+                int center = input[y * width + x];
                 for (int dy = -1; dy <= 1; dy++) {
                     int yy = clampIndex(y + dy, height);
                     int row = yy * width;
                     for (int dx = -1; dx <= 1; dx++) {
                         int xx = clampIndex(x + dx, width);
-                        window[count++] = input[row + xx];
+                        int value = input[row + xx];
+                        window[count++] = value;
+                        if ((dx != 0 || dy != 0) && Math.abs(value - center) <= GRAY_SIMILARITY_TOLERANCE) {
+                            similarNeighbors++;
+                        }
                     }
                 }
-                Arrays.sort(window);
-                output[y * width + x] = window[4];
+                if (similarNeighbors < MIN_SIMILAR_GRAY_NEIGHBORS) {
+                    Arrays.sort(window);
+                    output[y * width + x] = window[4];
+                }
             }
         }
         return output;

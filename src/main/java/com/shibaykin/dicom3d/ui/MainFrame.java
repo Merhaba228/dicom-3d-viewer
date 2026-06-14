@@ -33,6 +33,7 @@ import javax.swing.BoxLayout;
 import javax.swing.DefaultListCellRenderer;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JFileChooser;
 import javax.swing.JFrame;
@@ -86,6 +87,7 @@ public final class MainFrame extends JFrame {
     private final JSlider bandMinSlider = slider(-1000, 3000, 400);
     private final JSlider bandMaxSlider = slider(-1000, 3000, 3000);
     private final JSlider blurSlider = slider(0, 8, 0);
+    private final JCheckBox medianFilterCheckBox = new JCheckBox("Медианный фильтр 3×3", true);
     private final JLabel thresholdValueLabel = new JLabel();
     private final JLabel bandMinValueLabel = new JLabel();
     private final JLabel bandMaxValueLabel = new JLabel();
@@ -220,6 +222,9 @@ public final class MainFrame extends JFrame {
         filtersBlock.add(modelPresetLabel);
         filtersBlock.add(modelPresetCombo);
         filtersBlock.add(Box.createVerticalStrut(8));
+        medianFilterCheckBox.setAlignmentX(LEFT_ALIGNMENT);
+        filtersBlock.add(medianFilterCheckBox);
+        filtersBlock.add(Box.createVerticalStrut(8));
         addSliderRow(filtersBlock, "Размытие (0..8)", blurSlider, blurValueLabel);
         filtersBlock.add(resetAllFiltersButton);
         panel.add(filtersBlock);
@@ -348,6 +353,8 @@ public final class MainFrame extends JFrame {
         thumbnailList.setSelectionForeground(TEXT_PRIMARY);
         modelPresetCombo.setBackground(Color.WHITE);
         modelPresetCombo.setForeground(TEXT_PRIMARY);
+        medianFilterCheckBox.setBackground(BG_PANEL);
+        medianFilterCheckBox.setForeground(TEXT_PRIMARY);
 
         JMenuBar bar = getJMenuBar();
         if (bar != null) {
@@ -380,6 +387,7 @@ public final class MainFrame extends JFrame {
         brushSizeSlider.addChangeListener(event -> refreshMaskLabels());
         modelStepSlider.addChangeListener(event -> refreshModelLabels());
         modelPresetCombo.addActionListener(event -> applySelectedModelPreset());
+        medianFilterCheckBox.addActionListener(event -> updateSelectedPreview());
 
         pointCropModeToggle.addActionListener(event -> {
             if (!pointCropModeToggle.isSelected()) {
@@ -749,6 +757,7 @@ public final class MainFrame extends JFrame {
                 config.threshold(),
                 config.bandMin(),
                 config.bandMax(),
+                config.medianEnabled(),
                 config.blur()
         );
         applyManualMask(result, slice.getManualMask());
@@ -769,12 +778,14 @@ public final class MainFrame extends JFrame {
         int threshold = thresholdSlider.getValue();
         int bandMin = bandMinSlider.getValue();
         int bandMax = bandMaxSlider.getValue();
+        boolean medianEnabled = medianFilterCheckBox.isSelected();
         int blur = blurSlider.getValue();
 
         return new FilterConfig(
                 threshold,
                 bandMin,
                 bandMax,
+                medianEnabled,
                 blur
         );
     }
@@ -873,6 +884,7 @@ public final class MainFrame extends JFrame {
         ignoreModelPresetChange = true;
         modelPresetCombo.setSelectedItem(ModelPreset.FILTERED_MASK);
         ignoreModelPresetChange = false;
+        medianFilterCheckBox.setSelected(false);
         blurSlider.setValue(0);
         refreshFilterLabels();
 
@@ -946,6 +958,7 @@ public final class MainFrame extends JFrame {
         applyRangeButton.setEnabled(enabled);
         openModelButton.setEnabled(enabled);
         modelPresetCombo.setEnabled(enabled);
+        medianFilterCheckBox.setEnabled(enabled);
         maskModeToggle.setEnabled(enabled);
         pointCropModeToggle.setEnabled(enabled);
         resetAllFiltersButton.setEnabled(enabled);
@@ -1160,6 +1173,7 @@ public final class MainFrame extends JFrame {
             int threshold,
             int bandMin,
             int bandMax,
+            boolean medianEnabled,
             int blur
     ) {
     }

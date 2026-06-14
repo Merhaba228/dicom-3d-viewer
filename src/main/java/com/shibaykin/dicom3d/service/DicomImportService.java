@@ -83,9 +83,8 @@ public final class DicomImportService {
 
         int instanceNumber = attributes.getInt(Tag.InstanceNumber, Integer.MAX_VALUE);
         double[] imagePositionPatient = attributes.getDoubles(Tag.ImagePositionPatient);
-        double z = imagePositionPatient != null && imagePositionPatient.length >= 3
-                ? imagePositionPatient[2]
-                : Double.NaN;
+        double[] imageOrientationPatient = attributes.getDoubles(Tag.ImageOrientationPatient);
+        double z = slicePosition(imagePositionPatient, imageOrientationPatient);
 
         double[] pixelSpacing = attributes.getDoubles(Tag.PixelSpacing);
         double spacingY = pixelSpacing != null && pixelSpacing.length >= 1 ? pixelSpacing[0] : 1.0;
@@ -104,6 +103,25 @@ public final class DicomImportService {
                 spacingY,
                 sliceThickness
         );
+    }
+
+    private double slicePosition(double[] position, double[] orientation) {
+        if (position == null || position.length < 3) {
+            return Double.NaN;
+        }
+        if (orientation == null || orientation.length < 6) {
+            return position[2];
+        }
+
+        double normalX = orientation[1] * orientation[5] - orientation[2] * orientation[4];
+        double normalY = orientation[2] * orientation[3] - orientation[0] * orientation[5];
+        double normalZ = orientation[0] * orientation[4] - orientation[1] * orientation[3];
+        double normalLength = Math.sqrt(normalX * normalX + normalY * normalY + normalZ * normalZ);
+        if (!Double.isFinite(normalLength) || normalLength < 0.000001) {
+            return position[2];
+        }
+
+        return (position[0] * normalX + position[1] * normalY + position[2] * normalZ) / normalLength;
     }
 
     private BufferedImage readDicomImage(Path dicomPath) throws IOException {
