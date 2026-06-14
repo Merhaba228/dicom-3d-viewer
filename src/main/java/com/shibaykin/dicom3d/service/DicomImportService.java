@@ -5,6 +5,7 @@ import java.awt.image.BufferedImage;
 import java.awt.image.WritableRaster;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -38,20 +39,28 @@ public final class DicomImportService {
                     .collect(Collectors.toList());
         }
 
-        return loadFromPaths(dicomFiles);
+        return loadDicomPaths(dicomFiles);
     }
 
     public List<DicomSlice> loadFromPaths(List<Path> paths) throws IOException {
         List<Path> dicomPaths = paths.stream()
                 .filter(path -> Files.isRegularFile(path) && isDicom(path))
                 .collect(Collectors.toList());
+        return loadDicomPaths(dicomPaths);
+    }
+
+    private List<DicomSlice> loadDicomPaths(List<Path> dicomPaths) throws IOException {
         if (dicomPaths.isEmpty()) {
             throw new IOException("Файлы .dcm не найдены");
         }
 
-        List<DicomSlice> slices = new ArrayList<>(dicomPaths.size());
-        for (Path dicomPath : dicomPaths) {
-            slices.add(loadSingleSlice(dicomPath));
+        List<DicomSlice> slices;
+        try {
+            slices = dicomPaths.parallelStream()
+                    .map(this::loadSingleSliceUnchecked)
+                    .collect(Collectors.toCollection(() -> new ArrayList<>(dicomPaths.size())));
+        } catch (UncheckedIOException exception) {
+            throw exception.getCause();
         }
 
         slices.sort(Comparator
@@ -61,6 +70,14 @@ public final class DicomImportService {
 
         normalizeMissingZ(slices);
         return slices;
+    }
+
+    private DicomSlice loadSingleSliceUnchecked(Path path) {
+        try {
+            return loadSingleSlice(path);
+        } catch (IOException exception) {
+            throw new UncheckedIOException(exception);
+        }
     }
 
     private DicomSlice loadSingleSlice(Path dicomPath) throws IOException {
@@ -143,7 +160,7 @@ public final class DicomImportService {
 
     private BufferedImage renderHuToGray8(float[] huPixels, int width, int height, double center, double windowWidth) {
         BufferedImage normalized = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY);
-        WritableRaster output = normalized.getRaster();
+        byte[] output = ((java.awt.image.DataBufferByte) normalized.getRaster().getDataBuffer()).getData();
         double actualCenter = Double.isFinite(center) ? center : 300.0;
         double actualWidth = Double.isFinite(windowWidth) && windowWidth > 1.0 ? windowWidth : 1600.0;
         double low = actualCenter - actualWidth / 2.0;
@@ -152,14 +169,10 @@ public final class DicomImportService {
             high = low + 1.0;
         }
 
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int idx = y * width + x;
-                double hu = huPixels[idx];
-                int gray = (int) Math.round(((hu - low) / (high - low)) * 255.0);
-                gray = Math.max(0, Math.min(255, gray));
-                output.setSample(x, y, 0, gray);
-            }
+        for (int idx = 0; idx < output.length; idx++) {
+            double hu = huPixels[idx];
+            int gray = (int) Math.round(((hu - low) / (high - low)) * 255.0);
+            output[idx] = (byte) Math.max(0, Math.min(255, gray));
         }
         return normalized;
     }

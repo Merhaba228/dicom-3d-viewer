@@ -2,7 +2,7 @@ package com.shibaykin.dicom3d.service;
 
 import com.shibaykin.dicom3d.model.DicomSlice;
 import java.awt.image.BufferedImage;
-import java.awt.image.WritableRaster;
+import java.awt.image.DataBufferByte;
 import java.util.Arrays;
 
 public final class ImageProcessingService {
@@ -30,12 +30,9 @@ public final class ImageProcessingService {
 
     private BufferedImage toGrayImage(int[] pixels, int width, int height) {
         BufferedImage result = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY);
-        WritableRaster raster = result.getRaster();
-        int idx = 0;
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                raster.setSample(x, y, 0, pixels[idx++]);
-            }
+        byte[] output = ((DataBufferByte) result.getRaster().getDataBuffer()).getData();
+        for (int i = 0; i < output.length; i++) {
+            output[i] = (byte) pixels[i];
         }
         return result;
     }
@@ -45,12 +42,11 @@ public final class ImageProcessingService {
         int height = source.getHeight();
         int[] out = new int[width * height];
 
-        if (source.getRaster().getNumBands() == 1) {
-            int idx = 0;
-            for (int y = 0; y < height; y++) {
-                for (int x = 0; x < width; x++) {
-                    out[idx++] = source.getRaster().getSample(x, y, 0);
-                }
+        if (source.getType() == BufferedImage.TYPE_BYTE_GRAY
+                && source.getRaster().getDataBuffer() instanceof DataBufferByte buffer) {
+            byte[] input = buffer.getData();
+            for (int i = 0; i < out.length; i++) {
+                out[i] = input[i] & 0xFF;
             }
             return out;
         }

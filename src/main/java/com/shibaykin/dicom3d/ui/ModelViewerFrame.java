@@ -11,9 +11,9 @@ import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseWheelEvent;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferInt;
+import java.util.Arrays;
 import java.util.Locale;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
@@ -49,13 +49,31 @@ public final class ModelViewerFrame extends JFrame {
 
     private static final class ModelCanvas extends JPanel {
         private final Model3D model;
+        private final double[] pointX;
+        private final double[] pointY;
+        private final double[] pointZ;
+        private final int[] pointColors;
         private double angleX = Math.toRadians(-18);
         private double angleY = Math.toRadians(34);
         private double zoom = 1.0;
         private Point lastMouse;
+        private BufferedImage frameBuffer;
+        private float[] depthBuffer;
 
         private ModelCanvas(Model3D model) {
             this.model = model;
+            int pointCount = model.points().size();
+            pointX = new double[pointCount];
+            pointY = new double[pointCount];
+            pointZ = new double[pointCount];
+            pointColors = new int[pointCount];
+            for (int i = 0; i < pointCount; i++) {
+                ModelPoint point = model.points().get(i);
+                pointX[i] = point.x();
+                pointY[i] = point.y();
+                pointZ[i] = point.z();
+                pointColors[i] = point.r() << 16 | point.g() << 8 | point.b();
+            }
             setBackground(VIEW_BACKGROUND);
 
             MouseAdapter mouse = new MouseAdapter() {
@@ -102,56 +120,91 @@ public final class ModelViewerFrame extends JFrame {
             }
 
             double scale = Math.min(getWidth(), getHeight()) * 0.42 * zoom / model.radius();
-            drawPoints(g2, scale);
+            drawPoints(g2, scale, getWidth(), getHeight());
             g2.dispose();
         }
 
-        private void drawPoints(Graphics2D g2, double scale) {
-            List<DrawablePoint> points = new ArrayList<>(model.points().size());
-            for (ModelPoint point : model.points()) {
-                points.add(project(point, scale));
-            }
-            points.sort(Comparator.comparingDouble(DrawablePoint::depth));
+        private void drawPoints(Graphics2D g2, double scale, int width, int height) {
+            ensureBuffers(width, height);
+            int[] pixels = ((DataBufferInt) frameBuffer.getRaster().getDataBuffer()).getData();
+            Arrays.fill(pixels, VIEW_BACKGROUND.getRGB());
+            Arrays.fill(depthBuffer, Float.NEGATIVE_INFINITY);
 
-            for (DrawablePoint point : points) {
-                if (point.x() < -2 || point.x() > getWidth() + 2 || point.y() < -2 || point.y() > getHeight() + 2) {
-                    continue;
-                }
-                g2.setColor(point.color());
-                int size = point.size();
-                g2.fillOval(point.x() - size / 2, point.y() - size / 2, size, size);
-            }
-        }
-
-        private DrawablePoint project(ModelPoint point, double scale) {
             double sinX = Math.sin(angleX);
             double cosX = Math.cos(angleX);
             double sinY = Math.sin(angleY);
             double cosY = Math.cos(angleY);
+            double radius = Math.max(1.0, model.radius());
+            double centerX = width / 2.0;
+            double centerY = height / 2.0;
 
-            double rx = point.x() * cosY + point.z() * sinY;
-            double rz = -point.x() * sinY + point.z() * cosY;
-            double ry = point.y() * cosX - rz * sinX;
-            double rz2 = point.y() * sinX + rz * cosX;
+            for (int i = 0; i < pointX.length; i++) {
+                double rx = pointX[i] * cosY + pointZ[i] * sinY;
+                double rz = -pointX[i] * sinY + pointZ[i] * cosY;
+                double ry = pointY[i] * cosX - rz * sinX;
+                double depth = pointY[i] * sinX + rz * cosX;
 
-            int px = (int) Math.round(getWidth() / 2.0 + rx * scale);
-            int py = (int) Math.round(getHeight() / 2.0 - ry * scale);
-            double depth = rz2 / Math.max(1.0, model.radius());
-            double shade = Math.max(0.48, Math.min(1.22, 0.82 + depth * 0.16));
-            int size = depth > 0.35 ? 3 : 2;
-            Color color = new Color(
-                    clampColor(point.r() * shade),
-                    clampColor(point.g() * shade),
-                    clampColor(point.b() * shade)
-            );
-            return new DrawablePoint(px, py, rz2, color, size);
+                int px = (int) Math.round(centerX + rx * scale);
+                int py = (int) Math.round(centerY - ry * scale);
+                if (px < -2 || px > width + 2 || py < -2 || py > height + 2) {
+                    continue;
+                }
+
+                double normalizedDepth = depth / radius;
+                double shade = Math.max(0.48, Math.min(1.22, 0.82 + normalizedDepth * 0.16));
+                int size = normalizedDepth > 0.35 ? 3 : 2;
+                drawPoint(pixels, width, height, px, py, (float) depth, shadeColor(pointColors[i], shade), size);
+            }
+            g2.drawImage(frameBuffer, 0, 0, null);
+        }
+
+        private void ensureBuffers(int width, int height) {
+            if (frameBuffer == null || frameBuffer.getWidth() != width || frameBuffer.getHeight() != height) {
+                frameBuffer = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+                depthBuffer = new float[width * height];
+            }
+        }
+
+        private void drawPoint(
+                int[] pixels,
+                int width,
+                int height,
+                int centerX,
+                int centerY,
+                float depth,
+                int color,
+                int size
+        ) {
+            int minOffset = -size / 2;
+            int maxOffset = (size - 1) / 2;
+            for (int dy = minOffset; dy <= maxOffset; dy++) {
+                int y = centerY + dy;
+                if (y < 0 || y >= height) {
+                    continue;
+                }
+                for (int dx = minOffset; dx <= maxOffset; dx++) {
+                    int x = centerX + dx;
+                    if (x < 0 || x >= width) {
+                        continue;
+                    }
+                    int index = y * width + x;
+                    if (depth >= depthBuffer[index]) {
+                        depthBuffer[index] = depth;
+                        pixels[index] = color;
+                    }
+                }
+            }
+        }
+
+        private int shadeColor(int color, double shade) {
+            int red = clampColor(((color >> 16) & 0xFF) * shade);
+            int green = clampColor(((color >> 8) & 0xFF) * shade);
+            int blue = clampColor((color & 0xFF) * shade);
+            return red << 16 | green << 8 | blue;
         }
 
         private int clampColor(double value) {
             return Math.max(0, Math.min(255, (int) Math.round(value)));
         }
-    }
-
-    private record DrawablePoint(int x, int y, double depth, Color color, int size) {
     }
 }

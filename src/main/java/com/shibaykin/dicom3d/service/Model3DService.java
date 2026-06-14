@@ -2,16 +2,22 @@ package com.shibaykin.dicom3d.service;
 
 import com.shibaykin.dicom3d.model.DicomSlice;
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferByte;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.BitSet;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.WeakHashMap;
+import java.util.stream.IntStream;
 
 public final class Model3DService {
-    private static final int MAX_POINTS = 260_000;
+    private static final int MAX_POINTS = 500_000;
     private static final int MIN_3D_NEIGHBORS = 2;
     private static final int MIN_COMPONENT_VOXELS = 64;
     private static final int BODY_MASK_THRESHOLD_HU = -350;
+    private final Map<DicomSlice, BitSet> bodyMaskCache = Collections.synchronizedMap(new WeakHashMap<>());
 
     public Model3D buildSurfaceModel(
             List<DicomSlice> slices,
@@ -95,23 +101,56 @@ public final class Model3DService {
             int sliceStep,
             ModelPreset preset
     ) {
-        BitSet active = new BitSet(nx * ny * nz);
-        for (int z = 0; z < nz; z++) {
+        BitSet[] activeSlices = new BitSet[nz];
+        IntStream.range(0, nz).parallel().forEach(z -> {
             DicomSlice slice = slices.get(start + z * sliceStep);
             BufferedImage processed = slice.getProcessedImage();
-            BitSet bodyMask = buildLargestBodyMask(slice, BODY_MASK_THRESHOLD_HU);
+            byte[] processedPixels = processed.getType() == BufferedImage.TYPE_BYTE_GRAY
+                    && processed.getRaster().getDataBuffer() instanceof DataBufferByte buffer
+                    ? buffer.getData()
+                    : null;
+            BitSet bodyMask = cachedBodyMask(slice);
+            BitSet sliceActive = new BitSet(nx * ny);
             for (int y = 0; y < ny; y++) {
                 int sourceY = sampleCoord(y, step, slice.getHeight());
                 for (int x = 0; x < nx; x++) {
                     int sourceX = sampleCoord(x, step, slice.getWidth());
                     if (bodyMask.get(sourceY * slice.getWidth() + sourceX)
-                            && intensityAt(processed, sourceX, sourceY) != 0) {
-                        active.set(pointIndex(x, y, z, nx, ny));
+                            && intensityAt(processed, processedPixels, sourceX, sourceY) != 0) {
+                        sliceActive.set(y * nx + x);
                     }
                 }
             }
+            activeSlices[z] = sliceActive;
+        });
+
+        BitSet active = new BitSet(nx * ny * nz);
+        int sliceSize = nx * ny;
+        for (int z = 0; z < nz; z++) {
+            BitSet sliceActive = activeSlices[z];
+            for (int index = sliceActive.nextSetBit(0); index >= 0; index = sliceActive.nextSetBit(index + 1)) {
+                active.set(z * sliceSize + index);
+            }
         }
         return active;
+    }
+
+    private BitSet cachedBodyMask(DicomSlice slice) {
+        synchronized (bodyMaskCache) {
+            BitSet cached = bodyMaskCache.get(slice);
+            if (cached != null) {
+                return cached;
+            }
+        }
+        BitSet computed = buildLargestBodyMask(slice, BODY_MASK_THRESHOLD_HU);
+        synchronized (bodyMaskCache) {
+            BitSet cached = bodyMaskCache.get(slice);
+            if (cached != null) {
+                return cached;
+            }
+            bodyMaskCache.put(slice, computed);
+            return computed;
+        }
     }
 
     private BitSet buildLargestBodyMask(DicomSlice slice, int thresholdHu) {
@@ -403,7 +442,10 @@ public final class Model3DService {
         return new int[] { r, g, b };
     }
 
-    private int intensityAt(BufferedImage image, int x, int y) {
+    private int intensityAt(BufferedImage image, byte[] pixels, int x, int y) {
+        if (pixels != null) {
+            return pixels[y * image.getWidth() + x] & 0xFF;
+        }
         return image.getRaster().getNumBands() == 1
                 ? image.getRaster().getSample(x, y, 0)
                 : image.getRGB(x, y) & 0xFF;

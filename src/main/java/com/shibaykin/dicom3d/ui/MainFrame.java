@@ -21,11 +21,18 @@ import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferByte;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
+import java.util.prefs.Preferences;
 import javax.swing.AbstractAction;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -59,6 +66,8 @@ import javax.swing.filechooser.FileNameExtensionFilter;
 public final class MainFrame extends JFrame {
     private static final int WINDOW_WIDTH = 1500;
     private static final int WINDOW_HEIGHT = 920;
+    private static final int MAX_RECENT_FOLDERS = 5;
+    private static final String RECENT_FOLDER_KEY_PREFIX = "recentFolder.";
 
     private static final Color BG_APP = new Color(234, 239, 238);
     private static final Color BG_PANEL = new Color(247, 249, 248);
@@ -75,9 +84,13 @@ public final class MainFrame extends JFrame {
     private final DicomImportService importService = new DicomImportService();
     private final ImageProcessingService processingService = new ImageProcessingService();
     private final Model3DService model3DService = new Model3DService();
+    private final Preferences preferences = Preferences.userNodeForPackage(MainFrame.class);
 
     private final List<DicomSlice> slices = new ArrayList<>();
     private final List<Point> cropPoints = new ArrayList<>();
+    private final List<Path> recentFolders = new ArrayList<>();
+    private final Map<DicomSlice, FilterConfig> processedConfigs = new ConcurrentHashMap<>();
+    private final JMenu recentFoldersMenu = new JMenu("Недавние папки");
 
     private final JList<DicomSlice> thumbnailList = new JList<>();
     private final ImageCanvas originalCanvas = new ImageCanvas("Исходный срез");
@@ -148,6 +161,8 @@ public final class MainFrame extends JFrame {
         refreshModelLabels();
         updateSliceSliderBounds();
         updateRangeSliderBounds();
+        loadRecentFolders();
+        refreshRecentFoldersMenu();
     }
 
     private JMenuBar buildMenu() {
@@ -155,6 +170,7 @@ public final class MainFrame extends JFrame {
         JMenu fileMenu = new JMenu("Файл");
         fileMenu.add(menuItem("Импорт папки DICOM", () -> importDicom(true)));
         fileMenu.add(menuItem("Импорт файлов DICOM", () -> importDicom(false)));
+        fileMenu.add(recentFoldersMenu);
         fileMenu.addSeparator();
         fileMenu.add(menuItem("Выход", this::dispose));
         bar.add(fileMenu);
@@ -526,6 +542,9 @@ public final class MainFrame extends JFrame {
         chooser.setDialogTitle(directoryMode ? "Выберите папку DICOM" : "Выберите файлы DICOM");
         chooser.setFileSelectionMode(directoryMode ? JFileChooser.DIRECTORIES_ONLY : JFileChooser.FILES_ONLY);
         chooser.setMultiSelectionEnabled(!directoryMode);
+        if (!recentFolders.isEmpty()) {
+            chooser.setCurrentDirectory(recentFolders.get(0).toFile());
+        }
         if (!directoryMode) {
             chooser.setFileFilter(new FileNameExtensionFilter("Файлы DICOM (*.dcm)", "dcm"));
         }
@@ -536,6 +555,7 @@ public final class MainFrame extends JFrame {
 
         if (directoryMode) {
             Path directory = chooser.getSelectedFile().toPath();
+            rememberRecentFolder(directory);
             loadSlicesAsync(() -> importService.loadFromDirectory(directory), "Импорт папки: " + directory);
             return;
         }
@@ -545,6 +565,76 @@ public final class MainFrame extends JFrame {
             paths.add(file.toPath());
         }
         loadSlicesAsync(() -> importService.loadFromPaths(paths), "Импорт выбранных файлов");
+    }
+
+    private void loadRecentFolders() {
+        recentFolders.clear();
+        for (int i = 0; i < MAX_RECENT_FOLDERS; i++) {
+            String stored = preferences.get(RECENT_FOLDER_KEY_PREFIX + i, "");
+            if (!stored.isBlank()) {
+                addRecentFolderIfMissing(Path.of(stored));
+            }
+        }
+    }
+
+    private void rememberRecentFolder(Path directory) {
+        Path normalized = directory.toAbsolutePath().normalize();
+        recentFolders.removeIf(path -> path.toString().equalsIgnoreCase(normalized.toString()));
+        recentFolders.add(0, normalized);
+        while (recentFolders.size() > MAX_RECENT_FOLDERS) {
+            recentFolders.remove(recentFolders.size() - 1);
+        }
+        saveRecentFolders();
+        refreshRecentFoldersMenu();
+    }
+
+    private void addRecentFolderIfMissing(Path directory) {
+        Path normalized = directory.toAbsolutePath().normalize();
+        boolean duplicate = recentFolders.stream()
+                .anyMatch(path -> path.toString().equalsIgnoreCase(normalized.toString()));
+        if (!duplicate && recentFolders.size() < MAX_RECENT_FOLDERS) {
+            recentFolders.add(normalized);
+        }
+    }
+
+    private void openRecentFolder(Path directory) {
+        if (!Files.isDirectory(directory)) {
+            recentFolders.remove(directory);
+            saveRecentFolders();
+            refreshRecentFoldersMenu();
+            statusLabel.setText("Папка больше недоступна и удалена из списка: " + directory);
+            return;
+        }
+        rememberRecentFolder(directory);
+        loadSlicesAsync(() -> importService.loadFromDirectory(directory), "Импорт папки: " + directory);
+    }
+
+    private void clearRecentFolders() {
+        recentFolders.clear();
+        saveRecentFolders();
+        refreshRecentFoldersMenu();
+    }
+
+    private void saveRecentFolders() {
+        for (int i = 0; i < MAX_RECENT_FOLDERS; i++) {
+            String value = i < recentFolders.size() ? recentFolders.get(i).toString() : "";
+            preferences.put(RECENT_FOLDER_KEY_PREFIX + i, value);
+        }
+    }
+
+    private void refreshRecentFoldersMenu() {
+        recentFoldersMenu.removeAll();
+        if (recentFolders.isEmpty()) {
+            JMenuItem empty = new JMenuItem("Список пуст");
+            empty.setEnabled(false);
+            recentFoldersMenu.add(empty);
+            return;
+        }
+        for (Path directory : recentFolders) {
+            recentFoldersMenu.add(menuItem(directory.toString(), () -> openRecentFolder(directory)));
+        }
+        recentFoldersMenu.addSeparator();
+        recentFoldersMenu.add(menuItem("Очистить список", this::clearRecentFolders));
     }
 
     private void loadSlicesAsync(LoaderTask loaderTask, String loadingText) {
@@ -561,6 +651,7 @@ public final class MainFrame extends JFrame {
                 try {
                     slices.clear();
                     slices.addAll(get());
+                    processedConfigs.clear();
                     for (DicomSlice slice : slices) {
                         slice.setProcessedImage(slice.getOriginalImage());
                     }
@@ -601,8 +692,10 @@ public final class MainFrame extends JFrame {
             return;
         }
 
-        BufferedImage result = runFilters(slice, currentFilterConfig());
+        FilterConfig config = currentFilterConfig();
+        BufferedImage result = runFilters(slice, config);
         slice.setProcessedImage(result);
+        processedConfigs.put(slice, config);
         filteredCanvas.setImage(result);
         thumbnailList.repaint();
     }
@@ -632,13 +725,14 @@ public final class MainFrame extends JFrame {
         new SwingWorker<Void, Integer>() {
             @Override
             protected Void doInBackground() {
-                for (int i = range.start(); i <= range.end(); i++) {
-                    slices.get(i).setProcessedImage(runFilters(slices.get(i), config));
-                    int done = i - range.start() + 1;
+                AtomicInteger completed = new AtomicInteger();
+                IntStream.rangeClosed(range.start(), range.end()).parallel().forEach(i -> {
+                    applyFiltersIfNeeded(slices.get(i), config);
+                    int done = completed.incrementAndGet();
                     if (done == range.total() || done % 5 == 0) {
                         publish(done);
                     }
-                }
+                });
                 return null;
             }
 
@@ -713,9 +807,8 @@ public final class MainFrame extends JFrame {
         new SwingWorker<Model3D, Void>() {
             @Override
             protected Model3D doInBackground() {
-                for (int i = range.start(); i <= range.end(); i++) {
-                    slices.get(i).setProcessedImage(runFilters(slices.get(i), config));
-                }
+                IntStream.rangeClosed(range.start(), range.end()).parallel()
+                        .forEach(i -> applyFiltersIfNeeded(slices.get(i), config));
                 return model3DService.buildSurfaceModel(slices, range.start(), range.end(), step, preset);
             }
 
@@ -764,7 +857,28 @@ public final class MainFrame extends JFrame {
         return result;
     }
 
+    private void applyFiltersIfNeeded(DicomSlice slice, FilterConfig config) {
+        if (config.equals(processedConfigs.get(slice))) {
+            return;
+        }
+        slice.setProcessedImage(runFilters(slice, config));
+        processedConfigs.put(slice, config);
+    }
+
     private void applyManualMask(BufferedImage image, BufferedImage manualMask) {
+        if (image.getType() == BufferedImage.TYPE_BYTE_GRAY
+                && manualMask.getType() == BufferedImage.TYPE_BYTE_GRAY
+                && image.getRaster().getDataBuffer() instanceof DataBufferByte imageBuffer
+                && manualMask.getRaster().getDataBuffer() instanceof DataBufferByte maskBuffer) {
+            byte[] pixels = imageBuffer.getData();
+            byte[] mask = maskBuffer.getData();
+            for (int i = 0; i < pixels.length; i++) {
+                if (mask[i] == 0) {
+                    pixels[i] = 0;
+                }
+            }
+            return;
+        }
         for (int y = 0; y < image.getHeight(); y++) {
             for (int x = 0; x < image.getWidth(); x++) {
                 if (manualMask.getRaster().getSample(x, y, 0) == 0) {
@@ -897,6 +1011,7 @@ public final class MainFrame extends JFrame {
             slice.resetManualMask();
             slice.setProcessedImage(slice.getOriginalImage());
         }
+        processedConfigs.clear();
 
         repopulateThumbnails();
         int index = selectedIndex();
