@@ -115,6 +115,7 @@ public final class MainFrame extends JFrame {
     private final JSlider modelStepSlider = slider(1, 8, 3);
     private final JLabel modelStepValueLabel = new JLabel();
     private final JComboBox<ModelPreset> modelPresetCombo = new JComboBox<>(ModelPreset.values());
+    private final JCheckBox morphologyOperatorsCheckBox = new JCheckBox("Дилатация/эрозия для костей", true);
     private final JButton openModelButton = button("Построить облако точек", this::openModel3DAsync);
 
     private final JToggleButton maskModeToggle = new JToggleButton("Режим кисти");
@@ -258,6 +259,9 @@ public final class MainFrame extends JFrame {
 
         JPanel modelBlock = sectionPanel("Трехмерная визуализация");
         addSliderRow(modelBlock, "Шаг выборки точек", modelStepSlider, modelStepValueLabel);
+        morphologyOperatorsCheckBox.setAlignmentX(LEFT_ALIGNMENT);
+        modelBlock.add(morphologyOperatorsCheckBox);
+        modelBlock.add(Box.createVerticalStrut(8));
         modelBlock.add(openModelButton);
         panel.add(modelBlock);
         panel.add(Box.createVerticalStrut(10));
@@ -376,6 +380,8 @@ public final class MainFrame extends JFrame {
         medianFilterCheckBox.setForeground(TEXT_PRIMARY);
         standardMedianFilterCheckBox.setBackground(BG_PANEL);
         standardMedianFilterCheckBox.setForeground(TEXT_PRIMARY);
+        morphologyOperatorsCheckBox.setBackground(BG_PANEL);
+        morphologyOperatorsCheckBox.setForeground(TEXT_PRIMARY);
 
         JMenuBar bar = getJMenuBar();
         if (bar != null) {
@@ -800,6 +806,7 @@ public final class MainFrame extends JFrame {
         SliceRange range = currentRange();
         int step = modelStepSlider.getValue();
         ModelPreset preset = (ModelPreset) modelPresetCombo.getSelectedItem();
+        boolean morphologyEnabled = morphologyOperatorsCheckBox.isSelected();
 
         filterInProgress = true;
         setFilterControlsEnabled(false);
@@ -815,7 +822,14 @@ public final class MainFrame extends JFrame {
             protected Model3D doInBackground() {
                 IntStream.rangeClosed(range.start(), range.end()).parallel()
                         .forEach(i -> applyFiltersIfNeeded(slices.get(i), config));
-                return model3DService.buildSurfaceModel(slices, range.start(), range.end(), step, preset);
+                return model3DService.buildSurfaceModel(
+                        slices,
+                        range.start(),
+                        range.end(),
+                        step,
+                        preset,
+                        morphologyEnabled
+                );
             }
 
             @Override
@@ -830,11 +844,12 @@ public final class MainFrame extends JFrame {
 
                     statusLabel.setText(String.format(
                             Locale.US,
-                            "Трехмерная визуализация построена: %,d точек, срезы [%d..%d], шаг=%d%s.",
+                            "Трехмерная визуализация построена: %,d точек, срезы [%d..%d], шаг=%d, морфология=%s%s.",
                             model.points().size(),
                             range.start() + 1,
                             range.end() + 1,
                             step,
+                            morphologyEnabled ? "вкл" : "выкл",
                             model.truncated() ? ", ограничено для скорости" : ""
                     ));
                 } catch (InterruptedException interruptedException) {
@@ -1092,6 +1107,7 @@ public final class MainFrame extends JFrame {
         modelPresetCombo.setEnabled(enabled);
         medianFilterCheckBox.setEnabled(enabled);
         standardMedianFilterCheckBox.setEnabled(enabled);
+        morphologyOperatorsCheckBox.setEnabled(enabled);
         maskModeToggle.setEnabled(enabled);
         pointCropModeToggle.setEnabled(enabled);
         resetAllFiltersButton.setEnabled(enabled);
