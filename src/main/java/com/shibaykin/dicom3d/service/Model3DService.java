@@ -17,6 +17,14 @@ public final class Model3DService {
     private static final int MIN_3D_NEIGHBORS = 2;
     private static final int MIN_COMPONENT_VOXELS = 64;
     private static final int BODY_MASK_THRESHOLD_HU = -350;
+    private static final int BRIDGE_SUPPORT_MIN_HU = 20;
+    private static final int MAX_STERNUM_BRIDGE_VOXELS = 30;
+    private static final int MAX_PAIRED_ENDPOINT_Y_DELTA = 10;
+    private static final double MIN_SINGLE_BRIDGE_SUPPORT_RATIO = 0.65;
+    private static final double MIN_PAIRED_BRIDGE_SUPPORT_RATIO = 0.35;
+    private static final double MIN_BRIDGE_ADJACENT_RATIO = 0.45;
+    private static final double MAX_ANTERIOR_SHELL_DEPTH_MM = 45.0;
+    private static final double MIN_CHEST_WIDTH_DEPTH_RATIO = 1.15;
     private final Map<DicomSlice, BitSet> bodyMaskCache = Collections.synchronizedMap(new WeakHashMap<>());
 
     public Model3D buildSurfaceModel(
@@ -45,6 +53,19 @@ public final class Model3DService {
         }
 
         BitSet active = buildActiveVolume(slices, start, nx, ny, nz, sampleStep, sliceStep, actualPreset);
+        if (actualPreset == ModelPreset.BONES && isLikelyChestVolume(slices, start, end)) {
+            BitSet bridgeSupport = buildHuSupportVolume(
+                    slices,
+                    start,
+                    nx,
+                    ny,
+                    nz,
+                    sampleStep,
+                    sliceStep,
+                    BRIDGE_SUPPORT_MIN_HU
+            );
+            active = connectRibsToSternum(active, bridgeSupport, nx, ny, nz);
+        }
         active = removeIsolatedVoxels(active, nx, ny, nz, MIN_3D_NEIGHBORS);
         active = removeSmallComponents(active, nx, ny, nz, MIN_COMPONENT_VOXELS);
 
@@ -91,6 +112,38 @@ public final class Model3DService {
         return result;
     }
 
+    private boolean isLikelyChestVolume(List<DicomSlice> slices, int start, int end) {
+        int chestLikeSlices = 0;
+        int checkedSlices = 0;
+        for (int part = 1; part <= 5; part++) {
+            int index = start + part * (end - start) / 6;
+            DicomSlice slice = slices.get(index);
+            BitSet bodyMask = cachedBodyMask(slice);
+            int minX = slice.getWidth();
+            int maxX = -1;
+            int minY = slice.getHeight();
+            int maxY = -1;
+            for (int point = bodyMask.nextSetBit(0); point >= 0; point = bodyMask.nextSetBit(point + 1)) {
+                int y = point / slice.getWidth();
+                int x = point - y * slice.getWidth();
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            }
+            if (maxX < minX || maxY < minY) {
+                continue;
+            }
+            double physicalWidth = (maxX - minX + 1) * slice.getPixelSpacingX();
+            double physicalDepth = (maxY - minY + 1) * slice.getPixelSpacingY();
+            if (physicalWidth / Math.max(0.0001, physicalDepth) >= MIN_CHEST_WIDTH_DEPTH_RATIO) {
+                chestLikeSlices++;
+            }
+            checkedSlices++;
+        }
+        return checkedSlices > 0 && chestLikeSlices * 2 >= checkedSlices;
+    }
+
     private BitSet buildActiveVolume(
             List<DicomSlice> slices,
             int start,
@@ -133,6 +186,280 @@ public final class Model3DService {
             }
         }
         return active;
+    }
+
+    private BitSet buildHuSupportVolume(
+            List<DicomSlice> slices,
+            int start,
+            int nx,
+            int ny,
+            int nz,
+            int step,
+            int sliceStep,
+            int minHu
+    ) {
+        BitSet support = new BitSet(nx * ny * nz);
+        for (int z = 0; z < nz; z++) {
+            DicomSlice slice = slices.get(start + z * sliceStep);
+            BitSet bodyMask = cachedBodyMask(slice);
+            int[] anteriorSurface = anteriorBodySurface(bodyMask, slice.getWidth(), slice.getHeight());
+            int shellDepth = Math.max(1, (int) Math.ceil(MAX_ANTERIOR_SHELL_DEPTH_MM / slice.getPixelSpacingY()));
+            for (int y = 0; y < ny; y++) {
+                int sourceY = sampleCoord(y, step, slice.getHeight());
+                for (int x = 0; x < nx; x++) {
+                    int sourceX = sampleCoord(x, step, slice.getWidth());
+                    int sourceIndex = sourceY * slice.getWidth() + sourceX;
+                    int surfaceY = anteriorSurface[sourceX];
+                    if (surfaceY >= 0
+                            && sourceY <= surfaceY + shellDepth
+                            && bodyMask.get(sourceIndex)
+                            && slice.getHu(sourceY, sourceX) >= minHu) {
+                        support.set(pointIndex(x, y, z, nx, ny));
+                    }
+                }
+            }
+        }
+        return support;
+    }
+
+    private BitSet connectRibsToSternum(BitSet active, BitSet support, int nx, int ny, int nz) {
+        BitSet bridges = new BitSet(nx * ny * nz);
+        for (int z = 0; z < nz; z++) {
+            List<SliceComponent> components = findAnteriorComponents(active, support, z, nx, ny);
+            if (components.size() < 3) {
+                continue;
+            }
+            double centerX = (nx - 1) / 2.0;
+            SliceComponent sternum = components.stream()
+                    .filter(component -> component.points().size() >= 3)
+                    .filter(component -> Math.abs(component.centerX() - centerX) <= nx * 0.12)
+                    .min(java.util.Comparator.comparingDouble(component -> Math.abs(component.centerX() - centerX)))
+                    .orElse(null);
+            if (sternum == null) {
+                continue;
+            }
+            BridgeCandidate left = nearestRibBridge(active, support, sternum, components, true, z, nx, ny, nz);
+            BridgeCandidate right = nearestRibBridge(active, support, sternum, components, false, z, nx, ny, nz);
+            boolean paired = isPlausiblePair(left, right, nx);
+            if (isAcceptedBridge(left, paired)) {
+                addBridge(bridges, support, left.path(), z, nx, ny, nz);
+            }
+            if (isAcceptedBridge(right, paired)) {
+                addBridge(bridges, support, right.path(), z, nx, ny, nz);
+            }
+        }
+        BitSet result = (BitSet) active.clone();
+        result.or(bridges);
+        return result;
+    }
+
+    private List<SliceComponent> findAnteriorComponents(BitSet active, BitSet support, int z, int nx, int ny) {
+        int sliceSize = nx * ny;
+        int offset = z * sliceSize;
+        BitSet visited = new BitSet(sliceSize);
+        ArrayDeque<Integer> queue = new ArrayDeque<>();
+        List<SliceComponent> components = new ArrayList<>();
+        for (int seed = 0; seed < sliceSize; seed++) {
+            if (visited.get(seed) || !active.get(offset + seed) || !support.get(offset + seed)) {
+                continue;
+            }
+            List<Integer> points = new ArrayList<>();
+            double sumX = 0.0;
+            visited.set(seed);
+            queue.add(seed);
+            while (!queue.isEmpty()) {
+                int point = queue.removeFirst();
+                points.add(point);
+                int y = point / nx;
+                int x = point - y * nx;
+                sumX += x;
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        if (dx == 0 && dy == 0) {
+                            continue;
+                        }
+                        int xx = x + dx;
+                        int yy = y + dy;
+                        if (xx < 0 || yy < 0 || xx >= nx || yy >= ny) {
+                            continue;
+                        }
+                        int neighbor = yy * nx + xx;
+                        if (!visited.get(neighbor)
+                                && active.get(offset + neighbor)
+                                && support.get(offset + neighbor)) {
+                            visited.set(neighbor);
+                            queue.add(neighbor);
+                        }
+                    }
+                }
+            }
+            components.add(new SliceComponent(points, sumX / points.size()));
+        }
+        return components;
+    }
+
+    private BridgeCandidate nearestRibBridge(
+            BitSet active,
+            BitSet support,
+            SliceComponent sternum,
+            List<SliceComponent> components,
+            boolean left,
+            int z,
+            int nx,
+            int ny,
+            int nz
+    ) {
+        double centerX = (nx - 1) / 2.0;
+        Bridge best = null;
+        for (SliceComponent component : components) {
+            if (component == sternum || component.points().size() < 3) {
+                continue;
+            }
+            if ((left && component.centerX() >= centerX - 3) || (!left && component.centerX() <= centerX + 3)) {
+                continue;
+            }
+            Bridge candidate = nearestBridge(sternum, component, nx);
+            if (candidate != null && (best == null || candidate.distanceSquared() < best.distanceSquared())) {
+                best = candidate;
+            }
+        }
+        if (best == null
+                || best.distanceSquared() < 16
+                || best.distanceSquared() > MAX_STERNUM_BRIDGE_VOXELS * MAX_STERNUM_BRIDGE_VOXELS) {
+            return null;
+        }
+        List<Integer> path = curvedBridge(best.from(), best.to(), nx, ny);
+        if (path.isEmpty()) {
+            return null;
+        }
+        return bridgeCandidate(active, support, best, path, z, nx, ny, nz);
+    }
+
+    private Bridge nearestBridge(SliceComponent first, SliceComponent second, int nx) {
+        Bridge best = null;
+        for (int from : first.points()) {
+            int fromY = from / nx;
+            int fromX = from - fromY * nx;
+            for (int to : second.points()) {
+                int toY = to / nx;
+                int toX = to - toY * nx;
+                int dx = fromX - toX;
+                int dy = fromY - toY;
+                int distanceSquared = dx * dx + dy * dy;
+                if (best == null || distanceSquared < best.distanceSquared()) {
+                    best = new Bridge(from, to, distanceSquared);
+                }
+            }
+        }
+        return best;
+    }
+
+    private List<Integer> curvedBridge(int from, int to, int nx, int ny) {
+        int y0 = from / nx;
+        int x0 = from - y0 * nx;
+        int y1 = to / nx;
+        int x1 = to - y1 * nx;
+        double distance = Math.hypot(x1 - x0, y1 - y0);
+        int samples = Math.max(4, (int) Math.ceil(distance * 1.5));
+        double controlX = (x0 + x1) / 2.0;
+        double controlY = Math.max(0.0, Math.min(y0, y1) - distance * 0.12);
+        List<Integer> path = new ArrayList<>();
+        int previous = -1;
+        for (int i = 0; i <= samples; i++) {
+            double t = i / (double) samples;
+            double inv = 1.0 - t;
+            int x = (int) Math.round(inv * inv * x0 + 2.0 * inv * t * controlX + t * t * x1);
+            int y = (int) Math.round(inv * inv * y0 + 2.0 * inv * t * controlY + t * t * y1);
+            if (x < 0 || y < 0 || x >= nx || y >= ny) {
+                continue;
+            }
+            int point = y * nx + x;
+            if (point != previous) {
+                path.add(point);
+                previous = point;
+            }
+        }
+        return path;
+    }
+
+    private BridgeCandidate bridgeCandidate(
+            BitSet active,
+            BitSet support,
+            Bridge bridge,
+            List<Integer> path,
+            int z,
+            int nx,
+            int ny,
+            int nz
+    ) {
+        int supported = 0;
+        int adjacent = 0;
+        for (int point : path) {
+            int y = point / nx;
+            int x = point - y * nx;
+            if (isActive(support, x, y, z, nx, ny, nz)) {
+                supported++;
+            }
+            if (isActive(active, x, y, z - 1, nx, ny, nz)
+                    || isActive(active, x, y, z + 1, nx, ny, nz)
+                    || isActive(support, x, y, z - 1, nx, ny, nz)
+                    || isActive(support, x, y, z + 1, nx, ny, nz)) {
+                adjacent++;
+            }
+        }
+        int endpointY = bridge.to() / nx;
+        return new BridgeCandidate(
+                path,
+                endpointY,
+                bridge.distanceSquared(),
+                supported / (double) path.size(),
+                adjacent / (double) path.size()
+        );
+    }
+
+    private boolean isPlausiblePair(BridgeCandidate left, BridgeCandidate right, int nx) {
+        if (left == null || right == null) {
+            return false;
+        }
+        return Math.abs(left.endpointY() - right.endpointY()) <= MAX_PAIRED_ENDPOINT_Y_DELTA
+                && Math.abs(Math.sqrt(left.distanceSquared()) - Math.sqrt(right.distanceSquared())) <= nx * 0.12;
+    }
+
+    private boolean isAcceptedBridge(BridgeCandidate candidate, boolean paired) {
+        if (candidate == null || candidate.adjacentRatio() < MIN_BRIDGE_ADJACENT_RATIO) {
+            return false;
+        }
+        double requiredSupport = paired
+                ? MIN_PAIRED_BRIDGE_SUPPORT_RATIO
+                : MIN_SINGLE_BRIDGE_SUPPORT_RATIO;
+        return candidate.supportRatio() >= requiredSupport;
+    }
+
+    private void addBridge(BitSet result, BitSet support, List<Integer> path, int z, int nx, int ny, int nz) {
+        for (int point : path) {
+            int y = point / nx;
+            int x = point - y * nx;
+            result.set(pointIndex(x, y, z, nx, ny));
+            if (isActive(support, x, y, z - 1, nx, ny, nz)) {
+                result.set(pointIndex(x, y, z - 1, nx, ny));
+            }
+            if (isActive(support, x, y, z + 1, nx, ny, nz)) {
+                result.set(pointIndex(x, y, z + 1, nx, ny));
+            }
+        }
+    }
+
+    private int[] anteriorBodySurface(BitSet bodyMask, int width, int height) {
+        int[] surface = new int[width];
+        java.util.Arrays.fill(surface, -1);
+        for (int index = bodyMask.nextSetBit(0); index >= 0; index = bodyMask.nextSetBit(index + 1)) {
+            int y = index / width;
+            int x = index - y * width;
+            if (surface[x] < 0 || y < surface[x]) {
+                surface[x] = y;
+            }
+        }
+        return surface;
     }
 
     private BitSet cachedBodyMask(DicomSlice slice) {
@@ -367,6 +694,11 @@ public final class Model3DService {
         List<ModelPoint> points = new ArrayList<>();
         for (int z = 0; z < nz; z++) {
             DicomSlice slice = slices.get(start + z * sliceStep);
+            BufferedImage processed = slice.getProcessedImage();
+            byte[] processedPixels = processed.getType() == BufferedImage.TYPE_BYTE_GRAY
+                    && processed.getRaster().getDataBuffer() instanceof DataBufferByte buffer
+                    ? buffer.getData()
+                    : null;
             for (int y = 0; y < ny; y++) {
                 int sourceY = sampleCoord(y, step, slice.getHeight());
                 for (int x = 0; x < nx; x++) {
@@ -375,8 +707,12 @@ public final class Model3DService {
                     }
 
                     int sourceX = sampleCoord(x, step, slice.getWidth());
-                    int intensity = modelIntensity(slice, sourceX, sourceY, preset);
-                    int[] color = colorFor(slice, sourceX, sourceY, preset);
+                    boolean reconstructedBone = preset == ModelPreset.BONES
+                            && intensityAt(processed, processedPixels, sourceX, sourceY) == 0;
+                    int intensity = reconstructedBone ? 140 : modelIntensity(slice, sourceX, sourceY, preset);
+                    int[] color = reconstructedBone
+                            ? new int[] { 154, 147, 133 }
+                            : colorFor(slice, sourceX, sourceY, preset);
                     double px = (xBounds.min[x] + xBounds.max[x]) / 2.0;
                     double py = (yBounds.min[y] + yBounds.max[y]) / 2.0;
                     double pz = (zBounds.min[z] + zBounds.max[z]) / 2.0;
@@ -486,7 +822,7 @@ public final class Model3DService {
     }
 
     public enum ModelPreset {
-        BONES("Кости (HU 400..3000)", 400, 3000, 3),
+        BONES("Кости (HU 400..3000)", 400, 3000, 2),
         SOFT_TISSUE("Органы / мягкие ткани (HU 0..120)", 0, 120, 6),
         BODY("Тело целиком (HU -500..3000)", -500, 3000, 5),
         FILTERED_MASK("Ручной диапазон HU", Integer.MIN_VALUE, Integer.MAX_VALUE, 3);
@@ -522,6 +858,21 @@ public final class Model3DService {
     }
 
     private record AxisBounds(double[] min, double[] max) {
+    }
+
+    private record SliceComponent(List<Integer> points, double centerX) {
+    }
+
+    private record Bridge(int from, int to, int distanceSquared) {
+    }
+
+    private record BridgeCandidate(
+            List<Integer> path,
+            int endpointY,
+            int distanceSquared,
+            double supportRatio,
+            double adjacentRatio
+    ) {
     }
 
     private static final class Bounds {

@@ -14,18 +14,43 @@ public final class ImageProcessingService {
             int brightnessThreshold,
             int minHu,
             int maxHu,
-            boolean medianEnabled,
+            boolean gentleMedianEnabled,
+            boolean standardMedianEnabled,
             int blurRadius
     ) {
         int width = slice.getWidth();
         int height = slice.getHeight();
         int[] pixels = toGrayArray(slice.getOriginalImage());
 
-        int[] denoised = medianEnabled ? median3x3(pixels, width, height) : pixels;
+        int[] denoised = standardMedianEnabled
+                ? standardMedian3x3(pixels, width, height)
+                : gentleMedianEnabled ? gentleMedian3x3(pixels, width, height) : pixels;
         int[] blurred = blurRadius > 0 ? boxBlur(denoised, width, height, blurRadius) : denoised;
-        int[] filtered = huBandPass(blurred, slice.getHuPixels(), brightnessThreshold, minHu, maxHu);
+        float[] huPixels = standardMedianEnabled
+                ? standardMedian3x3(slice.getHuPixels(), width, height)
+                : slice.getHuPixels();
+        int[] filtered = huBandPass(blurred, huPixels, brightnessThreshold, minHu, maxHu);
 
         return toGrayImage(filtered, width, height);
+    }
+
+    public BufferedImage applyFilters(
+            DicomSlice slice,
+            int brightnessThreshold,
+            int minHu,
+            int maxHu,
+            boolean gentleMedianEnabled,
+            int blurRadius
+    ) {
+        return applyFilters(
+                slice,
+                brightnessThreshold,
+                minHu,
+                maxHu,
+                gentleMedianEnabled,
+                false,
+                blurRadius
+        );
     }
 
     private BufferedImage toGrayImage(int[] pixels, int width, int height) {
@@ -64,7 +89,7 @@ public final class ImageProcessingService {
         return out;
     }
 
-    private int[] median3x3(int[] input, int width, int height) {
+    private int[] gentleMedian3x3(int[] input, int width, int height) {
         int[] output = Arrays.copyOf(input, input.length);
         int[] window = new int[9];
 
@@ -89,6 +114,48 @@ public final class ImageProcessingService {
                     Arrays.sort(window);
                     output[y * width + x] = window[4];
                 }
+            }
+        }
+        return output;
+    }
+
+    private int[] standardMedian3x3(int[] input, int width, int height) {
+        int[] output = new int[input.length];
+        int[] window = new int[9];
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int count = 0;
+                for (int dy = -1; dy <= 1; dy++) {
+                    int yy = clampIndex(y + dy, height);
+                    int row = yy * width;
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int xx = clampIndex(x + dx, width);
+                        window[count++] = input[row + xx];
+                    }
+                }
+                Arrays.sort(window);
+                output[y * width + x] = window[4];
+            }
+        }
+        return output;
+    }
+
+    private float[] standardMedian3x3(float[] input, int width, int height) {
+        float[] output = new float[input.length];
+        float[] window = new float[9];
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int count = 0;
+                for (int dy = -1; dy <= 1; dy++) {
+                    int yy = clampIndex(y + dy, height);
+                    int row = yy * width;
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int xx = clampIndex(x + dx, width);
+                        window[count++] = input[row + xx];
+                    }
+                }
+                Arrays.sort(window);
+                output[y * width + x] = window[4];
             }
         }
         return output;
